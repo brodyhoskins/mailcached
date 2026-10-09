@@ -1,0 +1,26 @@
+#!/bin/sh
+
+# PROVIDE: mailcached
+# REQUIRE: LOGIN
+# KEYWORD: shutdown
+#
+# Ports below 1024 need root. Listen on high ports in mailcached.yaml, or
+# allow the mailcached user with mac_portacl(4).
+
+. /etc/rc.subr
+
+name=mailcached
+rcvar=mailcached_enable
+
+load_rc_config $name
+
+: ${mailcached_config:=/usr/local/etc/mailcached/mailcached.yaml}
+: ${mailcached_enable:=NO}
+: ${mailcached_user:=mailcached}
+
+command=/usr/sbin/daemon
+pidfile=/var/run/mailcached/mailcached.pid
+command_args="-f -P ${pidfile} -r -S -l mail -s info -T mailcached -u ${mailcached_user} /usr/local/bin/mailcached -config ${mailcached_config}"
+start_precmd="install -d -m 0700 -o ${mailcached_user} -g ${mailcached_user} /var/cache/mailcached && install -d -m 0755 /var/run/mailcached"
+
+run_rc_command "$1"

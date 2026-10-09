@@ -1,0 +1,135 @@
+# /etc/mailcached/mailcached.yaml: read by mailcached. Path settings may
+# use ${VAR}.
+
+# The messages clients read, so each is downloaded once, and each account's
+# mailbox state, in accounts/<login>/. These files hold your mail. Protect
+# the directory. Without cache_dir, messages are kept in memory only. Under
+# systemd, CacheDirectory= sets this.
+cache_dir: /var/cache/mailcached
+# cache_memory_bytes: 67108864       # in-memory cache, default 64 MiB
+# cache_max_age: 2160h               # delete cached messages unread for 90 days.
+                                     # Messages deleted at the provider leave the
+                                     # cache at the next folder sweep.
+# cache_min_free: 5%                 # free space to leave on the cache's file system:
+                                     # a percentage or a size (2GiB). Below it, the
+                                     # least recently read messages are deleted. 0: off.
+# cache_compression: auto            # auto: Zstandard, except on a file system that
+                                     # compresses already (Btrfs with compression, zram).
+                                     # zstd: always. off: never.
+# backfill: true                     # after a login, fill every folder's message
+                                     # list in the background, newest first: the
+                                     # header of each message. Needs cache_dir.
+
+# log: stderr                        # stderr | syslog | none | /path/to/file
+
+# Every connection uses TLS: from clients, and to the provider. mailcached
+# never falls back to plaintext. With starttls, a server that does not offer
+# STARTTLS is an error. tls: none and upstream_tls: none are refused unless
+# you set this, and then passwords and mail cross the network unprotected.
+# insecure_plaintext: false
+
+# The certificate clients see. It must match the name clients connect to,
+# for example a Tailscale host name. It is reloaded when the files change.
+tls:
+  cert_file: /etc/mailcached/tls/fullchain.pem
+  key_file: /etc/mailcached/tls/privkey.pem
+
+# Where a listener with only a port (":993") listens: IP addresses, host
+# names or interface names. Empty: every address. On Linux and macOS, an
+# interface name ties the listener to that interface, and replies to its
+# clients leave through it, whatever the routing table says. Elsewhere,
+# the interface's addresses stand for it. On Linux, clients that have
+# Multipath TCP (MPTCP) get it.
+# listen_addresses: [eth0, tailscale0]
+
+# Where connections to providers leave from, for an upstream without its
+# own source: an interface name (wg0, eth1) or a local IP address. Empty:
+# wherever routing says. An interface must route to the provider (for
+# WireGuard, AllowedIPs must cover it). Without a source, connections use
+# MPTCP on Linux when the provider has it.
+# upstream_source: wg0
+
+# Where clients connect. Clients log in with their provider user name and
+# password. mailcached passes them to the provider and keeps them in memory
+# only. listen is one host:port or a list. The host can be an interface
+# name: ["eth0:993", "192.168.1.10:143"].
+imap:
+  listen: ":993"
+  tls: implicit                      # implicit | starttls. COMPRESS=DEFLATE
+                                     # is offered with implicit TLS only.
+  # timeout: 1m
+  # max_message_bytes: 52428800      # largest APPEND
+
+smtp:
+  listen: ":465"
+  tls: implicit
+  # hostname: mail.example.ts.net    # greeting and EHLO name, default: host name
+  # timeout: 1m
+  # max_message_bytes: 52428800
+
+# JMAP clients connect over HTTPS. Their session URL is
+# https://<this host>:8443/.well-known/jmap. Responses are compressed with
+# Zstandard or gzip when the client accepts them.
+jmap:
+  listen: ":8443"
+  tls: implicit                      # implicit | none (HTTP has no STARTTLS)
+  # max_message_bytes: 52428800      # largest upload
+  # push_contact: mailto:you@example.com  # who push services see on
+  #                                       # PushSubscription pushes
+
+# Exchange ActiveSync devices (the iPhone's Mail app, among others)
+# connect over HTTPS, at /Microsoft-Server-ActiveSync. The listener also
+# answers Autodiscover, so a device finds it from the address when
+# autodiscover.<your domain> points here. Most devices use port 443 only.
+# activesync:
+#   listen: ":443"
+#   tls: implicit                    # implicit | none (HTTP has no STARTTLS)
+#   max_message_bytes: 52428800      # largest message a device sends
+
+# Which provider each login goes to. match is a full address or a domain
+# (@example.com). An address match wins over a domain match. mailcached
+# uses COMPRESS=DEFLATE with any IMAP server that offers it.
+#
+# For a login that matches no account, mailcached finds the servers from
+# the domain: the provider's autoconfig file, DNS SRV records, Mozilla's
+# ISP database and Exchange Autodiscover, for the domain and then for the
+# provider behind its MX record. It uses only servers with TLS. To see
+# what it finds, run: mailcached -detect alice@example.com
+# It also looks for a JMAP server (DNS SRV, then
+# https://<domain>/.well-known/jmap). autodetect_jmap says when it uses
+# one: fallback (when it finds no IMAP server), prefer (whenever it finds
+# one) or off. It also looks for an ActiveSync server at
+# /Microsoft-Server-ActiveSync on the IMAP host, mail.<domain>, <domain>
+# and autodiscover.<domain>. autodetect_activesync says when it uses one:
+# fallback (when it finds no IMAP or JMAP server), prefer (over IMAP) or
+# off. A JMAP server that is found wins over ActiveSync.
+# With autodetect: false, such a login is rejected without contacting
+# anyone, and accounts is required.
+# autodetect: true
+# autodetect_jmap: fallback
+# autodetect_activesync: fallback
+accounts:
+  - match: "@example.com"
+    imap:
+      upstream: imap.example.com:993
+      upstream_tls: implicit         # implicit | starttls
+    smtp:
+      upstream: smtp.example.com:465
+      upstream_tls: implicit
+  - match: "alice@example.org"
+    imap: {upstream: "mail.example.org:993", source: wg0}   # leaves through wg0
+    smtp: {upstream: "mail.example.org:587", upstream_tls: starttls}
+  # A JMAP provider: the account's mail comes from it, and imap is not
+  # used. Without smtp, mail clients send through JMAP too. With auth:
+  # bearer, clients log in with an API token as their password.
+  - match: "bob@example.net"
+    jmap:
+      upstream: https://api.fastmail.com/jmap/session
+      auth: bearer                   # basic (default) | bearer
+  # An Exchange ActiveSync provider: the account's mail comes from it,
+  # and imap is not used. Without smtp, mail clients send through it too,
+  # and the provider keeps the Sent copy. The path
+  # /Microsoft-Server-ActiveSync is added if left out.
+  # - match: "carol@example.info"
+  #   activesync:
+  #     upstream: https://mail.example.info/Microsoft-Server-ActiveSync

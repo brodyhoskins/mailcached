@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+
+command="/usr/bin/mailcached"
+command_args="-config /etc/mailcached/mailcached.yaml"
+command_background=true
+command_user="mailcached:mailcached"
+# Ports 993 and 465 without root.
+capabilities="^cap_net_bind_service"
+description="mailcached IMAP and SMTP cache"
+error_logger="logger -t mailcached -p mail.info"
+pidfile="/run/${RC_SVCNAME}.pid"
+
+depend() {
+	need net
+	use dns logger
+}
+
+start_pre() {
+	checkpath -d -m 0700 -o mailcached:mailcached /var/cache/mailcached
+}

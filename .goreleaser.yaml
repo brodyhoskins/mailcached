@@ -1,0 +1,107 @@
+archives:
+  - files:
+      - examples/**
+      - LICENSE
+      - README.md
+    formats: [tar.gz, tar.zst]
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}"
+
+before:
+  hooks:
+    - go mod verify
+    - rm -rf build
+    - mkdir build
+    - sh -c "git archive --prefix={{ .ProjectName }}-{{ .Version }}/ {{ .FullCommit }} | zstd -19 -q -o build/{{ .ProjectName }}-{{ .Version }}.tar.zst"
+
+builds:
+  - &build
+    binary: mailcached
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goarch: ["386", amd64, arm, arm64]
+    goarm: ["6"]
+    goos: [darwin, freebsd, linux, netbsd, openbsd]
+    id: mailcached
+    # modernc.org/sqlite does not build for these.
+    ignore:
+      - { goos: netbsd, goarch: "386" }
+      - { goos: netbsd, goarch: arm }
+      - { goos: netbsd, goarch: arm64 }
+      - { goos: openbsd, goarch: "386" }
+      - { goos: openbsd, goarch: arm }
+    ldflags:
+      - -s -w -X github.com/brodyhoskins/mailcached/internal/version.Version={{ .Version }}
+    main: ./cmd/mailcached
+    mod_timestamp: "{{ .CommitTimestamp }}"
+  - <<: *build
+    goarch: [arm]
+    goarm: ["7"]
+    id: mailcached-armv7
+
+changelog:
+  sort: asc
+  use: github
+
+checksum:
+  algorithm: sha256
+  extra_files:
+    - glob: build/{{ .ProjectName }}-{{ .Version }}.tar.zst
+  name_template: SHA256SUMS
+
+nfpms:
+  - &nfpm
+    bindir: /usr/bin
+    contents:
+      - dst: /etc/init.d/mailcached
+        file_info:
+          mode: 0755
+        packager: apk
+        src: examples/openrc/mailcached
+      - dst: /etc/mailcached/mailcached.yaml
+        src: examples/mailcached.yaml
+        type: config|noreplace
+      - dst: /usr/lib/systemd/system/mailcached.service
+        packager: deb
+        src: examples/systemd/mailcached.service
+      - dst: /usr/lib/systemd/system/mailcached.service
+        packager: rpm
+        src: examples/systemd/mailcached.service
+      - dst: /usr/share/doc/mailcached/examples
+        src: examples/
+      - dst: /usr/share/doc/mailcached/LICENSE
+        src: LICENSE
+      - dst: /usr/share/doc/mailcached/README.md
+        src: README.md
+    description: Local IMAP and SMTP server that caches mail from any provider, so mail clients get answers at once.
+    file_name_template: "{{ .ConventionalFileName }}"
+    formats: [apk, rpm]
+    homepage: https://github.com/brodyhoskins/mailcached
+    id: apk-rpm
+    license: MIT
+    maintainer: Brody Hoskins
+    package_name: mailcached
+    scripts:
+      postinstall: packaging/postinstall.sh
+      preinstall: packaging/preinstall.sh
+  - <<: *nfpm
+    formats: [deb]
+    id: deb
+    ids: [mailcached]
+
+project_name: mailcached
+
+release:
+  draft: false
+  extra_files:
+    - glob: build/{{ .ProjectName }}-{{ .Version }}.tar.zst
+  prerelease: auto
+
+source:
+  enabled: true
+  format: tar.gz
+  name_template: "{{ .ProjectName }}-{{ .Version }}"
+  prefix_template: "{{ .ProjectName }}-{{ .Version }}/"
+
+version: 2
