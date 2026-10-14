@@ -13,8 +13,8 @@ import (
 // FetchBatch is how many messages one upstream FETCH of full bodies asks for.
 const FetchBatch = 25
 
-// interactiveFetch is the most messages a download may have and still go
-// ahead of bulk downloads.
+// interactiveFetch is the most messages a request for pieces may have
+// and still go ahead of bulk downloads.
 const interactiveFetch = 3
 
 // fetchHeaders asks the provider for the header entries of msgs, and
@@ -60,6 +60,26 @@ func (l located) uids() []imap.UID {
 	return out
 }
 
+// inOrder returns the UIDs of l in the order of their first message in
+// msgs.
+func (l located) inOrder(msgs []*Message) []imap.UID {
+	uidOf := make(map[*Message]imap.UID, len(l))
+	for u, ms := range l {
+		for _, msg := range ms {
+			uidOf[msg] = u
+		}
+	}
+	out := make([]imap.UID, 0, len(l))
+	seen := make(map[imap.UID]bool, len(l))
+	for _, msg := range msgs {
+		if u, ok := uidOf[msg]; ok && !seen[u] {
+			seen[u] = true
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
 // locate groups msgs by where the provider has them, or for a queued copy
 // the message it copies. Messages the provider has nowhere are left out.
 func (a *Account) locate(msgs []*Message) map[string]located {
@@ -72,6 +92,28 @@ func (a *Account) locate(msgs []*Message) map[string]located {
 				out[box] = located{}
 			}
 			out[box][uid] = append(out[box][uid], msg)
+		}
+	}
+	return out
+}
+
+// boxesInOrder returns the folders of where in the order of their first
+// message in msgs.
+func boxesInOrder(where map[string]located, msgs []*Message) []string {
+	boxOf := map[*Message]string{}
+	for box, at := range where {
+		for _, ms := range at {
+			for _, msg := range ms {
+				boxOf[msg] = box
+			}
+		}
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, msg := range msgs {
+		if box, ok := boxOf[msg]; ok && !seen[box] {
+			seen[box] = true
+			out = append(out, box)
 		}
 	}
 	return out
@@ -145,15 +187,17 @@ type FetchStats struct {
 
 // download gets msgs from the cache, or fetches, transforms and caches them.
 // Results go to out, if not nil. A message another request is downloading
-// is waited for, not fetched twice. Only the immutable fields of the
-// messages (key, direct) are read without the lock. A background download
-// is bulk however few messages it has. st, if not nil, counts where the
-// messages came from.
+// is waited for, not fetched twice, except one a background download has
+// not started on, which a client takes over (claim). Only the immutable
+// fields of the messages (key, direct) are read without the lock. A
+// background download is bulk however few messages it has. st, if not
+// nil, counts where the messages came from.
 func (a *Account) download(msgs []*Message, out map[*Message][]byte, background bool, st *FetchStats) error {
 	if st == nil {
 		st = &FetchStats{}
 	}
 	b := a.b
+	cl := &claimer{background: background}
 	var mine []*Message
 	claimed := map[string]bool{}
 	waits := map[*Message]chan struct{}{}
@@ -177,37 +221,21 @@ func (a *Account) download(msgs []*Message, out map[*Message][]byte, background 
 			mine = append(mine, msg)
 			continue
 		}
-		ch, ok, bg := b.claim(key, background)
-		switch {
-		case ok:
+		if ch, ok := b.claim(key, cl); ok {
 			claimed[key] = true
 			mine = append(mine, msg)
-		case bg && !background:
-			// A client does not wait for a background download (read-ahead,
-			// backfill), which may be busy with a large batch: it fetches
-			// the message itself.
-			mine = append(mine, msg)
-		default:
+		} else {
 			waits[msg] = ch
-		}
-	}
-	// Each batch's claims are released as soon as it is cached, so a
-	// client waiting for one message does not wait for a whole bulk
-	// download.
-	done := func(msgs []*Message) {
-		for _, msg := range msgs {
-			if claimed[msg.key] {
-				delete(claimed, msg.key)
-				b.unclaim(msg.key)
-			}
 		}
 	}
 	st.Provider += len(mine)
 	st.Waited += len(waits)
-	err := a.fetchFrom(mine, out, done, background)
+	err := a.fetchFrom(mine, out, cl, background)
 	// What a failed download left claimed is released before waiting on
 	// others, so two requests never wait on each other.
-	done(mine)
+	for key := range claimed {
+		b.unclaim(key, cl)
+	}
 	if err != nil {
 		return err
 	}
@@ -231,16 +259,16 @@ func (a *Account) download(msgs []*Message, out map[*Message][]byte, background 
 }
 
 // fetchFrom downloads msgs over the pool, from wherever the provider has
-// them. A few messages (what a client opens, or new mail) are interactive;
-// more are a bulk download, which gives its connection back between
-// batches so interactive requests go first. done, if not nil, is called
-// with each batch once it is cached. A message the queue moved at the
-// provider meanwhile is fetched again from its new place.
-func (a *Account) fetchFrom(msgs []*Message, out map[*Message][]byte, done func([]*Message), background bool) error {
-	p := bulk
-	if len(msgs) <= interactiveFetch && !background {
-		p = interactive
-	}
+// them, in their order: folder by folder in the order of their first
+// message, and the first batch has the first messages. A client's first
+// batch is interactive; the rest, and all of a background download, are
+// bulk, which gives its connection back between batches so interactive
+// requests go first. With cl, it leaves out what a client took over
+// (startBatch), and releases each batch's claims once it is cached. A
+// message the queue moved at the provider meanwhile is fetched again from
+// its new place.
+func (a *Account) fetchFrom(msgs []*Message, out map[*Message][]byte, cl *claimer, background bool) error {
+	first := !background
 	for try := 0; try < 2 && len(msgs) > 0; try++ {
 		type place struct {
 			box string
@@ -254,13 +282,24 @@ func (a *Account) fetchFrom(msgs []*Message, out map[*Message][]byte, done func(
 		}
 		a.mu.Unlock()
 		got := map[*Message]bool{}
-		for box, at := range a.locate(msgs) {
-			for chunk := range slices.Chunk(at.uids(), FetchBatch) {
+		where := a.locate(msgs)
+		for _, box := range boxesInOrder(where, msgs) {
+			at := where[box]
+			for chunk := range slices.Chunk(at.inOrder(msgs), FetchBatch) {
+				p := bulk
+				if first {
+					p, first = interactive, false
+				}
 				c, err := a.conn(p, box)
 				if err != nil {
 					return err
 				}
-				batch, err := a.b.fetchFull(c, box, a.login, chunk, at, out)
+				chunk = a.b.startBatch(cl, chunk, at)
+				if len(chunk) == 0 {
+					c.Release(nil)
+					continue
+				}
+				batch, err := a.b.fetchFull(c, box, a.login, slices.Sorted(slices.Values(chunk)), at, out)
 				c.Release(err)
 				if err != nil {
 					return err
@@ -268,12 +307,12 @@ func (a *Account) fetchFrom(msgs []*Message, out map[*Message][]byte, done func(
 				for _, msg := range batch {
 					got[msg] = true
 				}
-				if done != nil {
-					var all []*Message
+				if cl != nil {
 					for _, u := range chunk {
-						all = append(all, at[u]...)
+						for _, msg := range at[u] {
+							a.b.unclaim(msg.key, cl)
+						}
 					}
-					done(all)
 				}
 			}
 		}
@@ -291,33 +330,73 @@ func (a *Account) fetchFrom(msgs []*Message, out map[*Message][]byte, done func(
 	return nil
 }
 
-// claim marks key as being downloaded. ok is false if another request is
-// downloading it already: ch closes when that download ends, and bg says
-// whether it is a background download.
-func (b *Engine) claim(key string, background bool) (ch chan struct{}, ok, bg bool) {
+// claimer is one download's hold on the messages it fetches.
+type claimer struct {
+	background bool // read-ahead, backfill
+}
+
+// claim marks key as being downloaded by cl. ok is false if another
+// download is fetching it: ch closes when that ends. A client's download takes over a message that a
+// background one (read-ahead, backfill) holds but has not started to
+// fetch, so the client does not wait behind the batches before it.
+func (b *Engine) claim(key string, cl *claimer) (ch chan struct{}, ok bool) {
 	b.flightMu.Lock()
 	defer b.flightMu.Unlock()
 	if f := b.inflight[key]; f != nil {
-		return f.done, false, f.background
+		if f.owner.background && !cl.background && !f.started {
+			f.owner = cl
+			return nil, true
+		}
+		return f.done, false
 	}
 	if b.inflight == nil {
 		b.inflight = map[string]*flight{}
 	}
-	b.inflight[key] = &flight{done: make(chan struct{}), background: background}
-	return nil, true, false
+	b.inflight[key] = &flight{done: make(chan struct{}), owner: cl}
+	return nil, true
 }
 
-func (b *Engine) unclaim(key string) {
+// unclaim ends cl's download of key, unless another download took it over.
+func (b *Engine) unclaim(key string, cl *claimer) {
 	b.flightMu.Lock()
 	defer b.flightMu.Unlock()
-	close(b.inflight[key].done)
-	delete(b.inflight, key)
+	if f := b.inflight[key]; f != nil && f.owner == cl {
+		close(f.done)
+		delete(b.inflight, key)
+	}
+}
+
+// startBatch marks the messages of chunk that cl claims as started, so no
+// client takes them over. For a background download, it returns the UIDs
+// whose messages cl still claims: a client took over the others. Otherwise
+// it returns chunk.
+func (b *Engine) startBatch(cl *claimer, chunk []imap.UID, at located) []imap.UID {
+	if cl == nil || !cl.background {
+		return chunk
+	}
+	b.flightMu.Lock()
+	defer b.flightMu.Unlock()
+	var out []imap.UID
+	for _, u := range chunk {
+		mine := false
+		for _, msg := range at[u] {
+			if f := b.inflight[msg.key]; f != nil && f.owner == cl {
+				f.started = true
+				mine = true
+			}
+		}
+		if mine {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 // flight is a download in progress.
 type flight struct {
-	done       chan struct{} // closed when it ends
-	background bool
+	done    chan struct{} // closed when it ends
+	owner   *claimer
+	started bool // its batch is being fetched
 }
 
 // prefetchMax is the most new messages one resync downloads ahead of
