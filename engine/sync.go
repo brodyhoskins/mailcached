@@ -134,7 +134,10 @@ func (a *Account) session(ctx context.Context) error {
 	nextSweep := time.Now().Add(poll)
 	for {
 		if time.Now().After(nextSweep) {
-			if time.Since(a.listedAt) > SyncListEvery {
+			a.listMu.Lock()
+			stale := time.Since(a.listedAt) > SyncListEvery
+			a.listMu.Unlock()
+			if stale {
 				if err := a.refreshList(up); err != nil {
 					return err
 				}
