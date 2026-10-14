@@ -128,6 +128,8 @@ func (a *Account) noteRead(name string, uids []imap.UID) {
 	r.running = true
 	if dir < 0 {
 		r.edge = next[0].uid
+		// Nearest to the client first: download keeps the order.
+		slices.Reverse(next)
 	} else {
 		r.edge = next[len(next)-1].uid
 	}

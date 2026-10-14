@@ -400,11 +400,12 @@ func TestDownloadReleasesEachBatch(t *testing.T) {
 }
 
 // holdFirstListener holds the provider's first read containing
-// "BODY.PEEK[]" until open closes, and passes the rest.
+// "BODY.PEEK[]" until open closes, and passes the rest. n counts them.
 type holdFirstListener struct {
 	net.Listener
 	open chan struct{}
 	seen atomic.Bool
+	n    atomic.Int32
 }
 
 func (l *holdFirstListener) Accept() (net.Conn, error) {
@@ -422,16 +423,20 @@ type holdFirstConn struct {
 
 func (c *holdFirstConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
-	if bytes.Contains(p[:n], []byte("BODY.PEEK[]")) && c.l.seen.CompareAndSwap(false, true) {
+	if !bytes.Contains(p[:n], []byte("BODY.PEEK[]")) {
+		return n, err
+	}
+	c.l.n.Add(1)
+	if c.l.seen.CompareAndSwap(false, true) {
 		<-c.l.open
 	}
 	return n, err
 }
 
-// TestClientSkipsBackgroundDownload checks that a client asking for a
-// message a background download (read-ahead) holds fetches it itself,
-// and does not wait for that download.
-func TestClientSkipsBackgroundDownload(t *testing.T) {
+// TestClientWaitsForBackgroundDownload checks that a client asking for a
+// message a background download (read-ahead) is fetching waits for it,
+// and the provider is asked for the message once.
+func TestClientWaitsForBackgroundDownload(t *testing.T) {
 	hold := &holdFirstListener{open: make(chan struct{})}
 	e := newEnvWith(t, func(l net.Listener) net.Listener { hold.Listener = l; return hold })
 	up := login(t, e.provider, nil)
@@ -458,24 +463,21 @@ func TestClientSkipsBackgroundDownload(t *testing.T) {
 		}
 		got <- err
 	}()
-	var err error
 	select {
-	case err = <-got:
-	case <-time.After(2 * time.Second):
-		t.Error("the client waited for the background download")
+	case err := <-got:
 		close(hold.open)
-		err = <-got
+		t.Fatalf("the client did not wait for the background download: %v", err)
+	case <-time.After(200 * time.Millisecond):
 	}
-	if err != nil {
+	close(hold.open)
+	if err := <-got; err != nil {
 		t.Fatal(err)
-	}
-	select {
-	case <-hold.open:
-	default:
-		close(hold.open)
 	}
 	if err := <-errc; err != nil {
 		t.Fatal(err)
+	}
+	if n := hold.n.Load(); n != 1 {
+		t.Errorf("the provider was asked for the message %d times, want 1", n)
 	}
 }
 
