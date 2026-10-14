@@ -92,9 +92,10 @@ type Config struct {
 	// CacheMaxAge deletes cached messages no client has read for this
 	// long. Default 90 days (2160h).
 	CacheMaxAge time.Duration `yaml:"cache_max_age"`
-	// CacheCompression is auto (default), zstd or off. auto writes
-	// uncompressed copies on a file system that compresses them (Btrfs
-	// with compression, zram) and Zstandard ones elsewhere.
+	// CacheCompression is auto (default), zstd or off. auto stores
+	// uncompressed chunks on a file system that compresses them (Btrfs
+	// with compression, zram) and Zstandard ones elsewhere. It applies to
+	// an account's chunk database when it is created.
 	CacheCompression string `yaml:"cache_compression"`
 	// CacheMinFree is the free space the cache leaves on its file system:
 	// a percentage ("5%") or a size ("2GiB", "500MB"). Below it, cached

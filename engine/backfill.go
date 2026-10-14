@@ -104,7 +104,7 @@ func (a *Account) backfill(ctx context.Context) error {
 	fromCache, err := a.backfillPass(ctx, log, "cached", cached, map[string]bool{}, func(msgs []*Message) (int, error) {
 		save := map[string]*HeaderEntry{}
 		for _, m := range msgs {
-			if data := a.b.Cache.readDisk(a.login, m.key); data != nil {
+			if data, _ := a.b.Cache.readDisk(a.login, m.key); data != nil {
 				save[m.key] = EntryOf(data)
 			}
 		}

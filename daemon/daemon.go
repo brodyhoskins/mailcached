@@ -252,6 +252,7 @@ func Main(p Program, args []string, stdout, stderr io.Writer) int {
 	minPercent, minBytes, _ := config.ParseMinFree(bc.CacheMinFree) // checked by Load
 	cache := &engine.Cache{Dir: bc.CacheDir, MaxBytes: bc.CacheMemoryBytes,
 		MinFreePercent: minPercent, MinFreeBytes: minBytes, Log: log}
+	defer cache.Close()
 	if bc.CacheDir != "" {
 		why := "cache_compression: " + bc.CacheCompression
 		switch bc.CacheCompression {
