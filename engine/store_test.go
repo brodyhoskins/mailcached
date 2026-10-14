@@ -31,6 +31,16 @@ func TestSchemaVersion(t *testing.T) {
 	if err := initSchema(db); err != nil {
 		t.Fatalf("second open: %v", err)
 	}
+	// A version 1 database from before a new table gets it on open.
+	if _, err := db.Exec(`DROP TABLE reads`); err != nil {
+		t.Fatal(err)
+	}
+	if err := initSchema(db); err != nil {
+		t.Fatalf("open without reads: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO reads (key, read_at) VALUES ('k', 1)`); err != nil {
+		t.Fatalf("reads not created: %v", err)
+	}
 	if _, err := db.Exec(`INSERT INTO meta (name, value) VALUES ('x', 'y'); PRAGMA user_version = 99`); err != nil {
 		t.Fatal(err)
 	}

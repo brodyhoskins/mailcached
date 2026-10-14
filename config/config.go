@@ -149,7 +149,9 @@ type Config struct {
 	AutodetectActiveSync string `yaml:"autodetect_activesync"`
 	// Backfill fills every folder's message list in the background after
 	// a login: header entries for unchanged mail, whole copies of mail a
-	// transform changes. Default true. It needs cache_dir.
+	// transform changes. It also downloads again the messages clients read
+	// within cache_max_age that the cache lost. Default true. It needs
+	// cache_dir.
 	Backfill *bool `yaml:"backfill"`
 }
 

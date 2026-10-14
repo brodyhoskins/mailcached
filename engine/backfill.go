@@ -23,7 +23,9 @@ import (
 // mail go first.
 //
 // It runs when the engine connects, and again after a sweep that found
-// new messages. Messages with an entry are skipped.
+// new messages. Messages with an entry are skipped, except those a client
+// read lately that the cache lost (refillable): they are downloaded again,
+// so a new or emptied cache gets back what clients read.
 
 // backfillWindow is how many messages, newest first across all folders,
 // the backfill handles at a time.
@@ -55,6 +57,28 @@ func (a *Account) startBackfill(ctx context.Context) {
 	}()
 }
 
+// lost returns the keys of the messages of todo to download again: those
+// a client read (RecordReads) since the last Prune of the Store that the
+// cache lost. Trim forgets the reads of what it deletes (Cache.Reads), so
+// they are not among them. None without a disk cache, whose memory holds
+// few.
+func (a *Account) lost(todo []backfillItem) (map[string]bool, error) {
+	if a.b.Cache.Dir == "" {
+		return nil, nil
+	}
+	reads, err := a.b.Store.reads(a.login)
+	if err != nil || len(reads) == 0 {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, it := range todo {
+		if _, ok := reads[it.msg.key]; ok && !a.b.Cache.Has(a.login, it.msg.key) {
+			out[it.msg.key] = true
+		}
+	}
+	return out, nil
+}
+
 // backfillItem is a message to backfill, in folder name.
 type backfillItem struct {
 	name string
@@ -77,21 +101,28 @@ func (a *Account) backfill(ctx context.Context) error {
 		}
 	}
 	a.mu.Unlock()
-	todo = slices.DeleteFunc(todo, func(it backfillItem) bool { return have[it.msg.key] })
+	// The checks on disk come after the lock.
+	lost, err := a.lost(todo)
+	if err != nil {
+		return err
+	}
+	todo = slices.DeleteFunc(todo, func(it backfillItem) bool { return have[it.msg.key] && !lost[it.msg.key] })
 	if len(todo) == 0 {
 		return nil
 	}
 	slices.SortFunc(todo, func(x, y backfillItem) int {
 		return cmp.Or(y.msg.date.Compare(x.msg.date), cmp.Compare(x.name, y.name), cmp.Compare(y.msg.uid, x.msg.uid))
 	})
-	// The checks on disk come after the lock.
-	var lists, changed, cached []backfillItem
+	var lists, whole, cached []backfillItem
 	for _, it := range todo {
 		switch {
+		case lost[it.msg.key]:
+			// Read lately, with or without a header entry.
+			whole = append(whole, it)
 		case a.b.Cache.Has(a.login, it.msg.key):
 			cached = append(cached, it)
 		case !it.msg.direct:
-			changed = append(changed, it)
+			whole = append(whole, it)
 		default:
 			lists = append(lists, it)
 		}
@@ -99,7 +130,7 @@ func (a *Account) backfill(ctx context.Context) error {
 
 	log := a.b.Log.With("user", a.login)
 	start := time.Now()
-	log.Info("backfill: started", "lists", len(lists), "changed", len(changed), "cached", len(cached))
+	log.Info("backfill: started", "lists", len(lists), "whole", len(whole), "cached", len(cached))
 	// Entries of cached messages first: no provider needed.
 	fromCache, err := a.backfillPass(ctx, log, "cached", cached, map[string]bool{}, func(msgs []*Message) (int, error) {
 		save := map[string]*HeaderEntry{}
@@ -121,7 +152,7 @@ func (a *Account) backfill(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	downloads, err := a.backfillPass(ctx, log, "changed", changed, skipped, func(msgs []*Message) (int, error) {
+	downloads, err := a.backfillPass(ctx, log, "whole", whole, skipped, func(msgs []*Message) (int, error) {
 		return len(msgs), a.download(msgs, nil, true, nil)
 	})
 	if err != nil {

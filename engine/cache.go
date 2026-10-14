@@ -27,6 +27,13 @@ var (
 	zdec, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(0), zstd.WithDecoderMaxMemory(1<<30))
 )
 
+// TrimReads is where Trim forgets the clients' reads of the messages it
+// deletes, by account folder (the Store).
+type TrimReads interface {
+	ForgetReads(dir string, keys []string) error
+	NoteReadsIn(dir string, keys []string) error
+}
+
 // Cache holds messages as clients see them, so each is fetched and
 // transformed once.
 // Entries are keyed by message fingerprint (fingerprintKey), not by folder
@@ -49,9 +56,18 @@ type Cache struct {
 	MinFreePercent float64
 	MinFreeBytes   int64
 	Log            *slog.Logger // for Trim; nil for none
+	// Reads, if not nil, keeps the clients' reads (the Store): Trim forgets
+	// those of the messages it deletes, so the backfill does not download
+	// them again.
+	Reads TrimReads
 
-	trim   trimState
-	statfs func(dir string) (avail, total uint64, err error) // tests; nil for the system's
+	trim trimState
+	// readsMu orders Trim with the writer of reads (noteReads): trimmed
+	// holds the keys Trim removed since they were last put, whose reads
+	// are not recorded.
+	readsMu sync.Mutex
+	trimmed map[string]bool
+	statfs  func(dir string) (avail, total uint64, err error) // tests; nil for the system's
 
 	dbMu   sync.Mutex
 	dbs    map[string]*chunkDB // by account folder
@@ -258,6 +274,9 @@ func (c *Cache) dropPieces(account, msgKey string) {
 
 func (c *Cache) put(account, key string, data []byte, persist bool) error {
 	now := time.Now()
+	c.readsMu.Lock()
+	delete(c.trimmed, key)
+	c.readsMu.Unlock()
 	c.remember(key, data, persist, now)
 	if !persist || c.Dir == "" {
 		return nil
@@ -286,6 +305,19 @@ func (c *Cache) Delete(account, key string) error {
 	}
 	err = db.remove(key)
 	return err
+}
+
+// noteReads records reads of keys with note, except of those Trim
+// removed: a read queued before the removal must not make the backfill
+// download the message again.
+func (c *Cache) noteReads(keys []string, note func(keys []string) error) error {
+	if c == nil {
+		return note(keys)
+	}
+	c.readsMu.Lock()
+	defer c.readsMu.Unlock()
+	keys = slices.DeleteFunc(keys, func(k string) bool { return c.trimmed[k] })
+	return note(keys)
 }
 
 // Close closes the chunk databases.

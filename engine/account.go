@@ -117,6 +117,12 @@ type Account struct {
 	// Read-ahead (readahead.go), by folder name.
 	raMu sync.Mutex
 	ra   map[string]*readAhead
+
+	// Client reads to record (RecordReads): one writer at a time takes
+	// the pending keys, so many reads make few transactions.
+	readsMu      sync.Mutex
+	readsPending map[string]bool
+	readsWriting bool
 }
 
 // Mailbox is the proxy's copy of one folder.

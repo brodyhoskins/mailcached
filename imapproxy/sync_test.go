@@ -67,6 +67,38 @@ func TestSyncPrefetchesNewMail(t *testing.T) {
 	}
 }
 
+// TestCachedReadRecorded records a client's read of a message served from
+// the cache, so the backfill downloads it again if the cache loses it.
+func TestCachedReadRecorded(t *testing.T) {
+	e := newEnv(t)
+	up := login(t, e.provider, nil)
+	c := login(t, e.proxy, nil)
+	waitSyncing(t, e.b, alice)
+	uid := appendMsg(t, up, "INBOX", plain(bob, "Lunch", "Tacos?"))
+
+	a := e.eng.Account(alice)
+	var key string
+	eventually(t, "the new message to be downloaded", func() bool {
+		a.Lock()
+		defer a.Unlock()
+		if m := a.Mailbox("INBOX"); m != nil && len(m.Msgs()) == 1 {
+			key = m.Msgs()[0].Key()
+		}
+		return key != "" && e.eng.Cache.Has(alice, key)
+	})
+	if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	whole := &imap.FetchOptions{BodySection: []*imap.FetchItemBodySection{{Peek: true}}}
+	if _, err := c.Fetch(imap.UIDSetNum(uid), whole).Collect(); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the read to be recorded", func() bool {
+		keys, _ := e.eng.Store.ReadKeys(alice)
+		return keys[key]
+	})
+}
+
 func waitSyncing(t *testing.T, b *Server, login string) {
 	t.Helper()
 	a := b.Engine.Account(login)

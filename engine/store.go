@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"uuid"
 
@@ -21,10 +23,11 @@ import (
 // Store keeps each account's mailbox state on disk, in one SQLite
 // database per account: folders, messages with the proxy's IDs and UIDs
 // and where the provider has them, the queue of changes not yet made at
-// the provider, and the header entries clients fill message lists with
-// (headerEntry). Never whole messages: those are in the Cache. It lets the
-// proxy answer clients right after a restart, before the sync has caught
-// up with the provider, and finish the queue after a shutdown.
+// the provider, the header entries clients fill message lists with
+// (headerEntry), and when clients last read each message, so a lost cache
+// can be filled again. Never whole messages: those are in the Cache. It
+// lets the proxy answer clients right after a restart, before the sync has
+// caught up with the provider, and finish the queue after a shutdown.
 //
 // Each account has its own database, so accounts never wait on each
 // other's writes, and an account is removed by deleting its folder
@@ -34,6 +37,9 @@ type Store struct {
 
 	mu  sync.Mutex
 	dbs map[string]*accountDB
+	// maxAge is the age of the last Prune: a database opened later is
+	// pruned with it, and readsSince returns nothing older.
+	maxAge atomic.Int64
 }
 
 // readConns is the size of an account's pool for reads.
@@ -98,6 +104,10 @@ CREATE TABLE IF NOT EXISTS headers (
 	structure  TEXT NOT NULL,
 	preview    TEXT,
 	used       INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS reads (
+	key      TEXT PRIMARY KEY,
+	read_at  INTEGER NOT NULL  -- unix seconds
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS jmap_boxes (
 	id         TEXT PRIMARY KEY,
@@ -211,6 +221,10 @@ func (s *Store) open(account string) (*accountDB, error) {
 		w.Close()
 		return nil, err
 	}
+	if age := time.Duration(s.maxAge.Load()); age > 0 {
+		// A failure waits for the next Prune.
+		_, _ = prune(w, time.Now().Add(-age).Unix())
+	}
 	// The journal mode is the writer's to set: setting it, even to what
 	// it is, can wait on a write.
 	r, err := sql.Open("sqlite", file+"&_pragma=query_only(1)")
@@ -241,8 +255,9 @@ func warm(path string) {
 }
 
 // schemaVersion is the version of storeSchema. Until the first release
-// there is one schema, version 1: a change to it is made in storeSchema,
-// and the old database is deleted by hand.
+// there is one schema, version 1: a change to it is made in storeSchema.
+// A new table is created in an old database when it opens (IF NOT
+// EXISTS); any other change needs the old database deleted by hand.
 const schemaVersion = 1
 
 // initSchema creates the tables of a new database. A database of another
@@ -260,7 +275,8 @@ func initSchema(db *sql.DB) error {
 		_, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion))
 		return err
 	case schemaVersion:
-		return nil
+		_, err := db.Exec(storeSchema)
+		return err
 	}
 	return fmt.Errorf("cache database has schema version %d, this build uses %d: delete the account's cache folder", v, schemaVersion)
 }
@@ -518,6 +534,138 @@ func (s *Store) headerKeys(account string) (map[string]bool, error) {
 	return out, rows.Err()
 }
 
+// noteReads records that a client read the messages of keys now, unless
+// a later read is recorded (a clock set back). The backfill downloads them
+// again if the cache loses them (readsSince).
+func (s *Store) noteReads(account string, keys []string) error {
+	if s == nil || len(keys) == 0 {
+		return nil
+	}
+	db, err := s.db(account)
+	if err != nil {
+		return err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	for _, key := range keys {
+		if _, err := tx.Exec(`INSERT INTO reads (key, read_at) VALUES (?, ?)
+			ON CONFLICT (key) DO UPDATE SET read_at = excluded.read_at WHERE read_at < excluded.read_at`,
+			key, now.Unix()); err != nil {
+			return errors.Join(err, tx.Rollback())
+		}
+	}
+	return tx.Commit()
+}
+
+// reads returns when a client last read each message, by key, within the
+// age of the last Prune. Times are in seconds.
+func (s *Store) reads(account string) (map[string]time.Time, error) {
+	if s == nil {
+		return nil, nil
+	}
+	var t time.Time
+	if age := time.Duration(s.maxAge.Load()); age > 0 {
+		t = time.Now().Add(-age)
+	}
+	db, err := s.reader(account)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT key, read_at FROM reads WHERE read_at >= ?`, t.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var key string
+		var at int64
+		if err := rows.Scan(&key, &at); err != nil {
+			return nil, err
+		}
+		out[key] = time.Unix(at, 0)
+	}
+	return out, rows.Err()
+}
+
+// readsSince returns the keys of the messages a client read after t, and
+// within the age of the last Prune. A read in the second of t counts, as
+// it may be after t.
+func (s *Store) readsSince(account string, t time.Time) (map[string]bool, error) {
+	all, err := s.reads(account)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for key, at := range all {
+		if readAfter(at, t) {
+			out[key] = true
+		}
+	}
+	return out, nil
+}
+
+// ForgetReads deletes the records of reads of keys in the account folder
+// dir: Trim deleted their messages (Cache.Reads), and the backfill must
+// not download them again.
+func (s *Store) ForgetReads(dir string, keys []string) error {
+	return s.inDir(dir, keys, `DELETE FROM reads WHERE key = ?`)
+}
+
+// NoteReadsIn records that a client read keys now, in the account folder
+// dir: Trim kept their messages, which a client read meanwhile, after
+// ForgetReads.
+func (s *Store) NoteReadsIn(dir string, keys []string) error {
+	now := strconv.FormatInt(time.Now().Unix(), 10)
+	return s.inDir(dir, keys, `INSERT INTO reads (key, read_at) VALUES (?, `+now+`)
+		ON CONFLICT (key) DO UPDATE SET read_at = excluded.read_at WHERE read_at < excluded.read_at`)
+}
+
+// inDir runs query with each of keys in one transaction, in the database
+// of the account folder dir, open or not. None if it has no database.
+func (s *Store) inDir(dir string, keys []string, query string) error {
+	if s == nil || len(keys) == 0 {
+		return nil
+	}
+	var db *sql.DB
+	s.mu.Lock()
+	for login, d := range s.dbs {
+		if accountDir(s.Dir, login) == dir {
+			db = d.w
+		}
+	}
+	s.mu.Unlock()
+	if db == nil {
+		// An account not open now: its file, if it has one.
+		path := filepath.Join(dir, "state.sqlite3")
+		if _, err := os.Stat(path); err != nil {
+			return nil
+		}
+		var err error
+		if db, err = sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)"); err != nil {
+			return err
+		}
+		defer db.Close()
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if _, err := tx.Exec(query, key); err != nil {
+			return errors.Join(err, tx.Rollback())
+		}
+	}
+	return tx.Commit()
+}
+
+// readAfter reports whether a read recorded at at may be after t: both are
+// in seconds.
+func readAfter(at, t time.Time) bool { return at.Unix() >= t.Unix() }
+
 // deleteHeaders drops the header entries of messages that are gone.
 func (s *Store) deleteHeaders(account string, keys []string) error {
 	if s == nil || len(keys) == 0 {
@@ -539,12 +687,14 @@ func (s *Store) deleteHeaders(account string, keys []string) error {
 	return tx.Commit()
 }
 
-// Prune deletes header entries not read for maxAge, in the databases open
-// now, and returns how many. Others are pruned when they are opened.
+// Prune deletes header entries not read for maxAge, and records of reads
+// older than that, in the databases open now. It returns how many header
+// entries it deleted. Others are pruned when they are opened.
 func (s *Store) Prune(maxAge time.Duration) (int, error) {
 	if s == nil || maxAge <= 0 {
 		return 0, nil
 	}
+	s.maxAge.Store(int64(maxAge))
 	s.mu.Lock()
 	dbs := make([]*sql.DB, 0, len(s.dbs))
 	for _, db := range s.dbs {
@@ -555,15 +705,25 @@ func (s *Store) Prune(maxAge time.Duration) (int, error) {
 	n := 0
 	var errs []error
 	for _, db := range dbs {
-		res, err := db.Exec(`DELETE FROM headers WHERE used < ?`, cutoff)
+		k, err := prune(db, cutoff)
+		n += k
 		if err != nil {
 			errs = append(errs, err)
-			continue
 		}
-		k, _ := res.RowsAffected()
-		n += int(k)
 	}
 	return n, errors.Join(errs...)
+}
+
+// prune deletes from db the header entries and the records of reads older
+// than cutoff (unix seconds), and returns how many header entries.
+func prune(db *sql.DB, cutoff int64) (int, error) {
+	res, err := db.Exec(`DELETE FROM headers WHERE used < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	_, err = db.Exec(`DELETE FROM reads WHERE read_at < ?`, cutoff)
+	return int(n), err
 }
 
 func joinFlags(flags []imap.Flag) string {

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -456,12 +457,78 @@ func (a *Account) Move(m *Mailbox, in func(*Message) bool, dest string) ([]Copie
 // Download returns the messages clients see, from the cache or by
 // fetching and transforming them. A message the provider no longer has is
 // missing from the result. st, if not nil, counts where they came from.
+// It counts as a client's read (RecordReads).
 func (a *Account) Download(msgs []*Message, st *FetchStats) (map[*Message][]byte, error) {
 	out := make(map[*Message][]byte, len(msgs))
 	if err := a.download(msgs, out, false, st); err != nil {
 		return nil, err
 	}
+	a.RecordReads(slices.Collect(maps.Keys(out)))
 	return out, nil
+}
+
+// RecordReads records that a client read msgs whole: the backfill
+// downloads a message read within the Store's Prune age again if the cache
+// loses it. Download records its own; a caller that reads the Cache
+// directly records them here.
+func (a *Account) RecordReads(msgs []*Message) {
+	a.readsMu.Lock()
+	defer a.readsMu.Unlock()
+	for _, msg := range msgs {
+		if a.readsPending == nil {
+			a.readsPending = map[string]bool{}
+		}
+		a.readsPending[msg.key] = true
+	}
+	if len(a.readsPending) == 0 || a.readsWriting {
+		return
+	}
+	a.b.readsMu.Lock()
+	defer a.b.readsMu.Unlock()
+	if a.b.readsClosed {
+		return
+	}
+	// In the background: a client does not wait on the write.
+	a.readsWriting = true
+	a.b.readsWG.Add(1)
+	go a.writeReads()
+}
+
+// writeReads records the pending reads until none are left, in one
+// transaction for each batch.
+func (a *Account) writeReads() {
+	defer a.b.readsWG.Done()
+	for {
+		a.readsMu.Lock()
+		pending := a.readsPending
+		a.readsPending = nil
+		if len(pending) == 0 {
+			a.readsWriting = false
+			a.readsMu.Unlock()
+			return
+		}
+		a.readsMu.Unlock()
+
+		keys := slices.Collect(maps.Keys(pending))
+		err := a.b.Cache.noteReads(keys, func(keys []string) error {
+			return a.b.Store.noteReads(a.login, keys)
+		})
+		if err != nil {
+			a.readsMu.Lock()
+			// Kept for the next RecordReads, which starts a writer again;
+			// stopping here, Close does not wait on a failing database.
+			a.b.Log.Warn("could not save read times", "user", a.login, "err", err)
+			if a.readsPending == nil {
+				a.readsPending = map[string]bool{}
+			}
+			for _, key := range keys {
+				a.readsPending[key] = true
+			}
+			a.readsWriting = false
+			a.readsMu.Unlock()
+			return
+		}
+	}
 }
 
 // NoteRead tells read-ahead that a client read messages of a folder.
