@@ -1,22 +1,18 @@
 package engine
 
 import (
-	"cmp"
 	"errors"
-	"os"
-	"path/filepath"
 	"slices"
-	"strings"
 	"sync/atomic"
 	"time"
 )
 
 // The cache leaves free space on its file system: MinFreePercent of it,
-// or MinFreeBytes, whichever is more. Below that, Trim deletes disk copies
-// least recently read first (a read updates a copy's modification time,
-// see touch), until a little more than the minimum is free, so it does not
-// run again for every new message. Only message copies are deleted; they
-// can be downloaded again. The mailbox state stays.
+// or MinFreeBytes, whichever is more. Below that, Trim deletes messages
+// least recently read first (see touch), until a little more than the
+// minimum is free, so it does not run again for every new message. Only
+// cached messages are deleted; they can be downloaded again. The mailbox
+// state stays.
 
 // trimEvery is how often a write checks the free space.
 const trimEvery = time.Minute
@@ -52,8 +48,9 @@ func (c *Cache) toFree() (int64, error) {
 	return minFree - avail + minFree/10, nil
 }
 
-// Trim deletes the least recently read disk copies until the free space is
-// back above the minimum, and returns how many it deleted.
+// Trim deletes the least recently read messages on disk until the free
+// space is back above the minimum, and returns how many it deleted. A
+// message frees only the chunks no other message has.
 func (c *Cache) Trim() (int, error) {
 	if !c.trim.running.CompareAndSwap(false, true) {
 		return 0, nil
@@ -63,43 +60,48 @@ func (c *Cache) Trim() (int, error) {
 	if err != nil || need <= 0 {
 		return 0, err
 	}
-	type copy struct {
-		path, key string
-		size      int64
-		used      time.Time
+	dbs, err := c.chunkDBs()
+	type stored struct {
+		db   *chunkDB
+		key  string
+		used time.Time
 	}
-	var all []copy
-	err = filepath.WalkDir(c.Dir, func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
+	var all []stored
+	for _, db := range dbs {
+		keys, times, rerr := db.readBefore(time.Now().Add(time.Hour))
+		if rerr != nil {
+			err = errors.Join(err, rerr)
+			continue
 		}
-		key, ok := copyKey(filepath.Base(p))
-		if !ok {
-			return nil
+		for i, k := range keys {
+			all = append(all, stored{db, k, times[i]})
 		}
-		fi, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		all = append(all, copy{p, key, fi.Size(), fi.ModTime()})
-		return nil
-	})
-	if err != nil {
-		return 0, err
 	}
-	slices.SortFunc(all, func(x, y copy) int { return cmp.Compare(x.used.UnixNano(), y.used.UnixNano()) })
+	slices.SortFunc(all, func(x, y stored) int { return x.used.Compare(y.used) })
 	n := 0
-	for _, f := range all {
+	touched := map[*chunkDB]bool{}
+	for _, m := range all {
 		if need <= 0 {
 			break
 		}
-		c.forget(f.key)
-		if err := os.Remove(f.path); err == nil {
-			need -= f.size
-			n++
+		c.forget(m.key)
+		// Only if not read since it was listed.
+		removed, freed, rerr := m.db.removeRead(m.used.Add(time.Second), m.key)
+		if rerr != nil {
+			err = errors.Join(err, rerr)
+			continue
 		}
+		if removed == 0 {
+			continue
+		}
+		touched[m.db] = true
+		need -= freed
+		n++
 	}
-	return n, nil
+	for db := range touched {
+		err = errors.Join(err, db.vacuum())
+	}
+	return n, err
 }
 
 // trimSoon checks the free space after a write, at most every trimEvery,
@@ -115,12 +117,4 @@ func (c *Cache) trimSoon() {
 			c.Log.Info("cache: disk nearly full, least recently read messages deleted", "deleted", n)
 		}
 	}()
-}
-
-// copyKey returns the cache key a disk copy's file name holds.
-func copyKey(name string) (string, bool) {
-	if key, ok := strings.CutSuffix(name, extZstd); ok {
-		return key, true
-	}
-	return strings.CutSuffix(name, extPlain)
 }

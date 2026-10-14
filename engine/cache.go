@@ -4,10 +4,9 @@ import (
 	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -17,20 +16,15 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// Disk copies are Zstandard-compressed, unless the file system compresses
-// them already (Cache.Plain). Level 3 (zstd's default) gets within a few
-// percent of the slowest levels on mail, at a fraction of the CPU time.
-// Encoder and decoder are safe for concurrent EncodeAll/DecodeAll.
+// Chunks on disk are Zstandard-compressed, unless the file system
+// compresses them already (Cache.Plain). Level 3 (zstd's default) gets
+// within a few percent of the slowest levels on mail, at a fraction of the
+// CPU time; Brotli saved 5% more on a real cache, and reads took five
+// times as long. Encoder and decoder are safe for concurrent
+// EncodeAll/DecodeAll.
 var (
 	zenc, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(1))
 	zdec, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(0), zstd.WithDecoderMaxMemory(1<<30))
-)
-
-// Disk copies are named <key>.eml, or <key>.eml.zst when compressed. A
-// copy of either kind is read, so a change of Plain needs no conversion.
-const (
-	extPlain = ".eml"
-	extZstd  = ".eml.zst"
 )
 
 // Cache holds messages as clients see them, so each is fetched and
@@ -40,14 +34,15 @@ const (
 // folders shares one.
 //
 // Entries live in memory (least recently used out first) and, if Dir is
-// set, on disk in the account's folder (accountDir). The disk copies are
-// not encrypted: with a Transform that decrypts, protect Dir like the
-// private keys.
+// set, on disk in the account's chunk database (chunkstore.go), where what
+// messages share is stored once. The disk store is not encrypted: with a
+// Transform that decrypts, protect Dir like the private keys.
 type Cache struct {
 	Dir      string // cache_dir
 	MaxBytes int64  // memory bound
-	// Plain writes disk copies uncompressed, for a file system that
-	// compresses them (see FSCompresses).
+	// Plain stores chunks uncompressed, for a file system that compresses
+	// them. It applies to new chunk databases: one keeps what it was made
+	// with.
 	Plain bool
 	// The free space to leave on Dir's file system (see Trim): a
 	// percentage of it, or bytes, whichever is more. Zero for neither.
@@ -58,21 +53,25 @@ type Cache struct {
 	trim   trimState
 	statfs func(dir string) (avail, total uint64, err error) // tests; nil for the system's
 
-	mu         sync.Mutex
-	converting chan struct{} // see convert
-	size       int64
-	lru        *list.List // of *cacheEntry, front is newest
-	index      map[string]*list.Element
+	dbMu   sync.Mutex
+	dbs    map[string]*chunkDB // by account folder
+	closed bool
+
+	mu    sync.Mutex
+	size  int64
+	lru   *list.List // of *cacheEntry, front is newest
+	index map[string]*list.Element
 	// pieces are the cached pieces of each message (piece.go), by the
 	// message's key. They are not saved: after a restart, the pieces of a
-	// message cached whole stay on disk until Trim takes them.
+	// message cached whole stay on disk until Prune or Trim takes them.
 	pieces map[string][]string
 }
 
 type cacheEntry struct {
-	key   string
-	data  []byte
-	final bool // false: a ReadRetry result, which Recheck drops
+	key    string
+	data   []byte
+	final  bool      // false: a ReadRetry result, which Recheck drops
+	readAt time.Time // of the disk copy, see touch
 }
 
 // fingerprintKey names a message by account, Message-ID, size on the
@@ -104,7 +103,8 @@ func (c *Cache) Has(account, key string) bool {
 	if ok || c.Dir == "" {
 		return ok
 	}
-	return c.find(account, key) != ""
+	db, err := c.chunkDB(account)
+	return err == nil && db.has(key)
 }
 
 // Get returns a cached message, or nil. A read counts as use for Prune.
@@ -124,32 +124,26 @@ func (c *Cache) get(account, key string) ([]byte, string) {
 	c.mu.Lock()
 	if el, ok := c.index[key]; ok {
 		c.lru.MoveToFront(el)
-		data := el.Value.(*cacheEntry).data
+		e := el.Value.(*cacheEntry)
+		data, readAt := e.data, e.readAt
+		touch := e.final && time.Since(readAt) >= touchEvery
+		if touch {
+			e.readAt = time.Now()
+		}
 		c.mu.Unlock()
-		c.touch(account, key)
+		if touch {
+			c.touch(account, key)
+		}
 		return data, fromMemory
 	}
 	c.mu.Unlock()
-	if c.Dir == "" {
+	data, readAt := c.readDisk(account, key)
+	if data == nil {
 		return nil, ""
 	}
-	p := c.find(account, key)
-	if p == "" {
-		return nil, ""
-	}
-	data, err := os.ReadFile(p)
-	if err != nil {
-		return nil, ""
-	}
-	if strings.HasSuffix(p, extZstd) {
-		if data, err = zdec.DecodeAll(data, nil); err != nil {
-			return nil, ""
-		}
-	}
-	c.remember(key, data, true) // read from disk: final
-	c.touchPath(p)
-	if p != c.path(account, key) {
-		c.convert(account, key, p, data)
+	c.remember(key, data, true, readAt) // read from disk: final
+	if time.Since(readAt) >= touchEvery {
+		c.touch(account, key)
 	}
 	return data, fromDisk
 }
@@ -157,106 +151,74 @@ func (c *Cache) get(account, key string) ([]byte, string) {
 // readDisk returns a message's disk copy, or nil, without keeping it in
 // memory or counting the read as use: for the backfill, which reads every
 // copy once and must not push out what clients are reading.
-func (c *Cache) readDisk(account, key string) []byte {
+func (c *Cache) readDisk(account, key string) ([]byte, time.Time) {
 	if c.Dir == "" {
-		return nil
+		return nil, time.Time{}
 	}
-	p := c.find(account, key)
-	if p == "" {
-		return nil
-	}
-	data, err := os.ReadFile(p)
+	db, err := c.chunkDB(account)
 	if err != nil {
-		return nil
+		c.logWarn("cache: chunk database", err)
+		return nil, time.Time{}
 	}
-	if strings.HasSuffix(p, extZstd) {
-		if data, err = zdec.DecodeAll(data, nil); err != nil {
-			return nil
-		}
+	data, readAt, err := db.read(key)
+	if err != nil {
+		c.logWarn("cache: read", err)
+		return nil, time.Time{}
 	}
-	return data
+	return data, readAt
 }
 
-// convertMax bounds the disk copies being converted at once.
-const convertMax = 2
-
-// convert rewrites a disk copy read in the other format (written under
-// the other setting, or on another file system) in the format Put writes,
-// in the background, and removes the old copy. A copy that finds no free
-// worker is converted on a later read.
-func (c *Cache) convert(account, key, old string, data []byte) {
-	c.mu.Lock()
-	if c.converting == nil {
-		c.converting = make(chan struct{}, convertMax)
+func (c *Cache) logWarn(msg string, err error) {
+	if c.Log != nil {
+		c.Log.Warn(msg, "err", err)
 	}
-	sem := c.converting
-	c.mu.Unlock()
-	select {
-	case sem <- struct{}{}:
-	default:
-		return
-	}
-	go func() {
-		defer func() { <-sem }()
-		if err := c.write(account, key, data); err != nil {
-			return
-		}
-		// Gone already: the message was deleted meanwhile, and so is the
-		// new copy.
-		if err := os.Remove(old); os.IsNotExist(err) {
-			_ = os.Remove(c.path(account, key))
-		}
-	}()
 }
 
-// touchEvery limits how often a read updates a file's time.
+// touchEvery limits how often a read updates a message's read time.
 const touchEvery = 24 * time.Hour
 
-// touch records a read in the disk copy's modification time, which Prune
-// goes by. File access times are not used: many systems do not keep them.
+// touch records a read in the disk store, which Prune and Trim go by, in
+// the background: a read does not wait on writes.
 func (c *Cache) touch(account, key string) {
 	if c.Dir == "" {
 		return
 	}
-	if p := c.find(account, key); p != "" {
-		c.touchPath(p)
-	}
-}
-
-func (c *Cache) touchPath(p string) {
-	fi, err := os.Stat(p)
-	if err != nil || time.Since(fi.ModTime()) < touchEvery {
+	db, err := c.chunkDB(account)
+	if err != nil {
 		return
 	}
-	now := time.Now()
-	_ = os.Chtimes(p, now, now)
+	go func() { _ = db.touch(key, time.Now()) }()
 }
 
-// Prune deletes disk copies not read for maxAge, and returns how many.
+// Prune deletes the messages on disk not read for maxAge, and returns how
+// many.
 func (c *Cache) Prune(maxAge time.Duration) (int, error) {
 	if c.Dir == "" || maxAge <= 0 {
 		return 0, nil
 	}
-	cutoff := time.Now().Add(-maxAge)
+	dbs, err := c.chunkDBs()
 	n := 0
-	err := filepath.WalkDir(c.Dir, func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
+	for _, db := range dbs {
+		cutoff := time.Now().Add(-maxAge)
+		keys, _, rerr := db.readBefore(cutoff)
+		if rerr != nil {
+			err = errors.Join(err, rerr)
+			continue
 		}
-		key, ok := copyKey(filepath.Base(p))
-		if !ok {
-			return nil
+		for _, k := range keys {
+			c.forget(k)
 		}
-		fi, err := d.Info()
-		if err != nil || !fi.ModTime().Before(cutoff) {
-			return nil
+		// Again by cutoff: a message read since stays.
+		removed, _, rerr := db.removeRead(cutoff, keys...)
+		if rerr != nil {
+			err = errors.Join(err, rerr)
+			continue
 		}
-		c.forget(key)
-		if err := os.Remove(p); err == nil {
-			n++
+		n += removed
+		if removed > 0 {
+			err = errors.Join(err, db.vacuum())
 		}
-		return nil
-	})
+	}
 	return n, err
 }
 
@@ -295,46 +257,19 @@ func (c *Cache) dropPieces(account, msgKey string) {
 }
 
 func (c *Cache) put(account, key string, data []byte, persist bool) error {
-	c.remember(key, data, persist)
+	now := time.Now()
+	c.remember(key, data, persist, now)
 	if !persist || c.Dir == "" {
 		return nil
 	}
-	if err := c.write(account, key, data); err != nil {
-		return err
-	}
-	// A copy written under the other setting is stale now.
-	_ = os.Remove(c.altPath(account, key))
-	c.trimSoon()
-	return nil
-}
-
-// write saves a disk copy in the format Put writes.
-func (c *Cache) write(account, key string, data []byte) error {
-	p := c.path(account, key)
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(p), ".tmp-*")
+	db, err := c.chunkDB(account)
 	if err != nil {
 		return err
 	}
-	out := data
-	if !c.Plain {
-		out = zenc.EncodeAll(data, nil)
-	}
-	if _, err := tmp.Write(out); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+	if err := db.write(key, data, now); err != nil {
 		return err
 	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	if err := os.Rename(tmp.Name(), p); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
+	c.trimSoon()
 	return nil
 }
 
@@ -345,12 +280,25 @@ func (c *Cache) Delete(account, key string) error {
 	if c.Dir == "" {
 		return nil
 	}
-	for _, p := range []string{c.path(account, key), c.altPath(account, key)} {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			return err
-		}
+	db, err := c.chunkDB(account)
+	if err != nil {
+		return err
 	}
-	return nil
+	err = db.remove(key)
+	return err
+}
+
+// Close closes the chunk databases.
+func (c *Cache) Close() error {
+	c.dbMu.Lock()
+	defer c.dbMu.Unlock()
+	c.closed = true
+	var errs []error
+	for _, db := range c.dbs {
+		errs = append(errs, db.close())
+	}
+	c.dbs = nil
+	return errors.Join(errs...)
 }
 
 // forget drops a message from memory. Keys include the account, so the
@@ -365,36 +313,9 @@ func (c *Cache) forget(key string) {
 	}
 }
 
-// path is where Put writes a disk copy, altPath where the other setting
-// would have.
-func (c *Cache) path(account, key string) string {
-	return c.pathExt(account, key, c.Plain)
-}
-
-func (c *Cache) altPath(account, key string) string {
-	return c.pathExt(account, key, !c.Plain)
-}
-
-func (c *Cache) pathExt(account, key string, plain bool) string {
-	ext := extZstd
-	if plain {
-		ext = extPlain
-	}
-	return filepath.Join(accountDir(c.Dir, account), "messages", key[:2], key+ext)
-}
-
-// find returns the disk copy of key, "" if there is none. The plain copy
-// comes first: it is cheaper to read.
-func (c *Cache) find(account, key string) string {
-	for _, p := range []string{c.pathExt(account, key, true), c.pathExt(account, key, false)} {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	return ""
-}
-
-func (c *Cache) remember(key string, data []byte, final bool) {
+// remember keeps a message in memory; readAt is when the disk copy was
+// last read.
+func (c *Cache) remember(key string, data []byte, final bool, readAt time.Time) {
 	if int64(len(data)) > c.MaxBytes/4 {
 		return // one huge message would flush everything else
 	}
@@ -407,10 +328,10 @@ func (c *Cache) remember(key string, data []byte, final bool) {
 	if el, ok := c.index[key]; ok {
 		e := el.Value.(*cacheEntry)
 		c.size += int64(len(data) - len(e.data))
-		e.data, e.final = data, final
+		e.data, e.final, e.readAt = data, final, readAt
 		c.lru.MoveToFront(el)
 	} else {
-		c.index[key] = c.lru.PushFront(&cacheEntry{key: key, data: data, final: final})
+		c.index[key] = c.lru.PushFront(&cacheEntry{key: key, data: data, final: final, readAt: readAt})
 		c.size += int64(len(data))
 	}
 	for c.size > c.MaxBytes && c.lru.Len() > 0 {

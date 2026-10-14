@@ -15,7 +15,8 @@ cache_dir: /var/cache/mailcached
                                      # least recently read messages are deleted. 0: off.
 # cache_compression: auto            # auto: Zstandard, except on a file system that
                                      # compresses already (Btrfs with compression, zram).
-                                     # zstd: always. off: never.
+                                     # zstd: always. off: never. It applies to an
+                                     # account's cache when it is created.
 # backfill: true                     # after a login, fill every folder's message
                                      # list in the background, newest first: the
                                      # header of each message. Needs cache_dir.
