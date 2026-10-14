@@ -78,7 +78,11 @@ type Account struct {
 	// syncLocks serializes the work on each provider folder: resyncs, and
 	// queued changes. Different folders sync in parallel.
 	syncLocks sync.Map // name -> *sync.Mutex
-	// listedAt is when the folder list was last read from the provider.
+	// listMu serializes refreshList, from the read at the provider to the
+	// change to a.boxes: a list read before a folder change must not land
+	// after the list read since. listedAt is when the folder list was last
+	// read from the provider (listMu held).
+	listMu   sync.Mutex
 	listedAt time.Time
 
 	// The queue of changes for the provider (queue.go), oldest first
@@ -827,6 +831,8 @@ var fullFlagInterval = 10 * time.Minute
 
 // refreshList reads the folder list from the provider.
 func (a *Account) refreshList(c conn) error {
+	a.listMu.Lock()
+	defer a.listMu.Unlock()
 	list, err := c.List()
 	if err != nil {
 		return err
