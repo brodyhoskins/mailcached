@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"time"
+
 	"github.com/emersion/go-imap/v2"
 )
 
@@ -69,3 +71,8 @@ func (msg *Message) AtProvider() (string, imap.UID) { return msg.pBox, msg.pUID 
 
 // HeaderKeys returns the cache keys with a header entry.
 func (s *Store) HeaderKeys(account string) (map[string]bool, error) { return s.headerKeys(account) }
+
+// ReadKeys returns the cache keys of the messages a client read whole.
+func (s *Store) ReadKeys(account string) (map[string]bool, error) {
+	return s.readsSince(account, time.Time{})
+}

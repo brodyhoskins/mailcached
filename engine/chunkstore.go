@@ -71,7 +71,8 @@ const (
 // databases: one connection for writes, a pool for reads.
 type chunkDB struct {
 	w, r     *sql.DB
-	compress bool // chunk_compression is zstd
+	compress bool   // chunk_compression is zstd
+	dir      string // the account folder
 }
 
 // chunkDB opens an account's chunk database, creating it.
@@ -109,7 +110,7 @@ func (c *Cache) openChunkDB(dir string, create bool) (*chunkDB, error) {
 		return nil, err
 	}
 	w.SetMaxOpenConns(1)
-	db := &chunkDB{w: w}
+	db := &chunkDB{w: w, dir: dir}
 	if err := db.init(c.Plain); err != nil {
 		w.Close()
 		return nil, fmt.Errorf("%s: %w", path, err)

@@ -268,6 +268,12 @@ func Main(p Program, args []string, stdout, stderr io.Writer) int {
 		}
 		log.Info("cache compression", "zstd", !cache.Plain, "reason", why)
 	}
+	// The Store's age before any account opens: a backfill must not
+	// count reads older than cache_max_age. No database is open yet.
+	if _, err := store.Prune(bc.CacheMaxAge); err != nil {
+		log.Warn("header prune", "err", err)
+	}
+	cache.Reads = store
 	go pruneCache(cache, store, bc.CacheMaxAge, log)
 	eng := &engine.Engine{
 		Store: store,

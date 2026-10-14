@@ -19,7 +19,10 @@ cache_dir: /var/cache/mailcached
                                      # account's cache when it is created.
 # backfill: true                     # after a login, fill every folder's message
                                      # list in the background, newest first: the
-                                     # header of each message. Needs cache_dir.
+                                     # header of each message. It also downloads
+                                     # again what clients read within
+                                     # cache_max_age if the cache lost it.
+                                     # Needs cache_dir.
 
 # log: stderr                        # stderr | syslog | none | /path/to/file
 

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"cmp"
 	"io"
+	"maps"
 	"slices"
 	"time"
 
@@ -147,6 +148,7 @@ func (s *Session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *
 	if err := s.writeAll(w, now, options, headers, cached, nil, &sent); err != nil {
 		return err
 	}
+	s.acct.RecordReads(slices.Collect(maps.Keys(cached)))
 	if len(later) == 0 {
 		return nil
 	}

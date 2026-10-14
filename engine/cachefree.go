@@ -84,12 +84,11 @@ func (c *Cache) Trim() (int, error) {
 		if need <= 0 {
 			break
 		}
-		c.forget(m.key)
-		// Only if not read since it was listed.
-		removed, freed, rerr := m.db.removeRead(m.used.Add(time.Second), m.key)
+		// Under readsMu, so a read written meanwhile is either forgotten
+		// here or not written (noteReads).
+		removed, freed, rerr := c.trimOne(m.db, m.key, m.used)
 		if rerr != nil {
 			err = errors.Join(err, rerr)
-			continue
 		}
 		if removed == 0 {
 			continue
@@ -102,6 +101,28 @@ func (c *Cache) Trim() (int, error) {
 		err = errors.Join(err, db.vacuum())
 	}
 	return n, err
+}
+
+// trimOne removes key from db if it was not read since used, and then
+// forgets its reads, or records a read if a client read it meanwhile.
+func (c *Cache) trimOne(db *chunkDB, key string, used time.Time) (removed int, freed int64, err error) {
+	c.readsMu.Lock()
+	defer c.readsMu.Unlock()
+	c.forget(key)
+	removed, freed, err = db.removeRead(used.Add(time.Second), key)
+	if c.Reads == nil {
+		return removed, freed, err
+	}
+	keys := []string{key}
+	if removed == 0 {
+		// Kept: a client read it meanwhile.
+		return 0, 0, errors.Join(err, c.Reads.NoteReadsIn(db.dir, keys))
+	}
+	if c.trimmed == nil {
+		c.trimmed = map[string]bool{}
+	}
+	c.trimmed[key] = true
+	return removed, freed, errors.Join(err, c.Reads.ForgetReads(db.dir, keys))
 }
 
 // trimSoon checks the free space after a write, at most every trimEvery,

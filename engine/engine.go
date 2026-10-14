@@ -87,11 +87,22 @@ type Engine struct {
 	accounts   map[string]*Account // by lowercased login
 	syncBase   context.Context
 	syncCancel context.CancelFunc
+
+	// The writers of client reads (Account.RecordReads), which Close
+	// waits for: the Store closes after the Engine.
+	readsMu     sync.Mutex
+	readsClosed bool
+	readsWG     sync.WaitGroup
 }
 
-// Close ends every account's engine and drops every password.
+// Close ends every account's engine, drops every password, and waits for
+// the read times to be written.
 func (b *Engine) Close() {
 	b.stopSync()
+	b.readsMu.Lock()
+	b.readsClosed = true
+	b.readsMu.Unlock()
+	b.readsWG.Wait()
 }
 
 // id is what the engine sends with the IMAP ID command.
