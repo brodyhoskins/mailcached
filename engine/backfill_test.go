@@ -81,8 +81,16 @@ func TestBackfillRefill(t *testing.T) {
 	c.MinFreePercent = 5
 	c.statfs = func(string) (uint64, uint64, error) { return 0, 10000, nil }
 	c.Reads = st
+	// Listed before Trim, as when Trim runs while lost holds the reads.
+	listed, err := st.readsSince(a.login, time.Time{})
+	if err != nil || !listed[read.key] {
+		t.Fatalf("reads = %v, %v; want %s", listed, err, read.key)
+	}
 	if n, err := c.Trim(); n != 1 || err != nil {
 		t.Fatalf("Trim = %d, %v; want 1", n, err)
+	}
+	if got := c.uncached(a.login, []string{read.key}); got[read.key] {
+		t.Fatal("a read listed before Trim deleted it was returned for refill")
 	}
 	if err := a.backfill(context.Background()); err != nil {
 		t.Fatal(err)

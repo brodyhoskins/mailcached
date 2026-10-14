@@ -59,9 +59,9 @@ func (a *Account) startBackfill(ctx context.Context) {
 
 // lost returns the keys of the messages of todo to download again: those
 // a client read (RecordReads) since the last Prune of the Store that the
-// cache lost. Trim forgets the reads of what it deletes (Cache.Reads), so
-// they are not among them. None without a disk cache, whose memory holds
-// few.
+// cache lost. Trim forgets the reads of what it deletes (Cache.Reads), and
+// Cache.uncached leaves out what it deleted since the reads were listed.
+// None without a disk cache, whose memory holds few.
 func (a *Account) lost(todo []backfillItem) (map[string]bool, error) {
 	if a.b.Cache.Dir == "" {
 		return nil, nil
@@ -70,13 +70,13 @@ func (a *Account) lost(todo []backfillItem) (map[string]bool, error) {
 	if err != nil || len(reads) == 0 {
 		return nil, err
 	}
-	out := map[string]bool{}
+	var read []string
 	for _, it := range todo {
-		if _, ok := reads[it.msg.key]; ok && !a.b.Cache.Has(a.login, it.msg.key) {
-			out[it.msg.key] = true
+		if _, ok := reads[it.msg.key]; ok {
+			read = append(read, it.msg.key)
 		}
 	}
-	return out, nil
+	return a.b.Cache.uncached(a.login, read), nil
 }
 
 // backfillItem is a message to backfill, in folder name.

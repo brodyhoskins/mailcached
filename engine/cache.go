@@ -320,6 +320,21 @@ func (c *Cache) noteReads(keys []string, note func(keys []string) error) error {
 	return note(keys)
 }
 
+// uncached returns those of keys not cached and not removed by Trim,
+// holding off Trim meanwhile: a read of a message Trim removes must not
+// make the backfill download it again.
+func (c *Cache) uncached(account string, keys []string) map[string]bool {
+	c.readsMu.Lock()
+	defer c.readsMu.Unlock()
+	out := map[string]bool{}
+	for _, k := range keys {
+		if !c.trimmed[k] && !c.Has(account, k) {
+			out[k] = true
+		}
+	}
+	return out
+}
+
 // Close closes the chunk databases.
 func (c *Cache) Close() error {
 	c.dbMu.Lock()
