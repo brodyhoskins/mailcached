@@ -257,7 +257,9 @@ func (b *Engine) Recheck() {
 	b.syncMu.Lock()
 	accounts := make([]*Account, 0, len(b.accounts))
 	for _, a := range b.accounts {
-		accounts = append(accounts, a)
+		if a.isLoaded() {
+			accounts = append(accounts, a)
+		}
 	}
 	b.syncMu.Unlock()
 	for _, a := range accounts {

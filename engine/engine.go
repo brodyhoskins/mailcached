@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/tls"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -27,9 +28,11 @@ type Upstream struct {
 	TLS       string // IMAP: config.TLSImplicit, TLSStartTLS or TLSNone
 	TLSConfig *tls.Config
 	Timeout   time.Duration
-	// Source is where connections to the provider leave from: an
-	// interface name or a local IP address. Empty: wherever routing says.
-	Source string
+	// Sources are where connections to the provider may leave from:
+	// interface names or local IP addresses. IMAP keeps a count and a
+	// limit for each; HTTP connections take them in turn. None: wherever
+	// routing says.
+	Sources []string
 	// URL is a JMAP provider's session resource, such as
 	// https://example.com/.well-known/jmap. It makes the provider JMAP.
 	URL string
@@ -40,6 +43,19 @@ type Upstream struct {
 	// https://example.com/Microsoft-Server-ActiveSync. It makes the
 	// provider ActiveSync.
 	ActiveSync string
+	// MaxConns caps the connections (IMAP) or the requests at a time
+	// (JMAP, ActiveSync) to the provider, counting the engine's own. 0:
+	// no cap but the provider's, which an IMAP provider shows by refusing
+	// a connection and a JMAP one gives in its session.
+	MaxConns int
+}
+
+// same reports whether u and v are the same provider, reached the same
+// way.
+func (u Upstream) same(v Upstream) bool {
+	return u.Addr == v.Addr && u.TLS == v.TLS && u.TLSConfig == v.TLSConfig && u.Timeout == v.Timeout &&
+		slices.Equal(u.Sources, v.Sources) && u.URL == v.URL && u.Bearer == v.Bearer &&
+		u.ActiveSync == v.ActiveSync && u.MaxConns == v.MaxConns
 }
 
 // String names the provider, for logs and for the state saved for it.
@@ -77,6 +93,9 @@ type Engine struct {
 	syncOnce sync.Once
 	syncSec  *imap.FetchItemBodySection // see syncSection
 
+	hostsMu   sync.Mutex
+	imapHosts map[[2]string]*imapHost // by Upstream.Addr and source
+
 	// inflight holds the cache keys being downloaded, so a client asking
 	// for a message the engine is fetching already waits for that
 	// download, unless it is a background one (read-ahead, backfill).
@@ -87,6 +106,8 @@ type Engine struct {
 	accounts   map[string]*Account // by lowercased login
 	syncBase   context.Context
 	syncCancel context.CancelFunc
+	closing    bool           // under syncMu: Preload loads no more accounts
+	preloadWG  sync.WaitGroup // Preload's worker, which Close waits for
 
 	// The writers of client reads (Account.RecordReads), which Close
 	// waits for: the Store closes after the Engine.
@@ -98,6 +119,10 @@ type Engine struct {
 // Close ends every account's engine, drops every password, and waits for
 // the read times to be written.
 func (b *Engine) Close() {
+	b.syncMu.Lock()
+	b.closing = true
+	b.syncMu.Unlock()
+	b.preloadWG.Wait()
 	b.stopSync()
 	b.readsMu.Lock()
 	b.readsClosed = true

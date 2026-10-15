@@ -86,10 +86,13 @@ func TestHold(t *testing.T) {
 	appendAt(t, up, "INBOX", sealed("Secret", "The number is 42."), later)
 	appendAt(t, up, "INBOX", plain(bob, "Plain", "Hello."), later)
 	eventually(t, "the sync to hold one", func() bool { return a.Held() == 1 && numIn(t, c, "INBOX") == 2 })
-	if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+	// The SELECT's own data: imapclient's Wait can return before
+	// c.Mailbox() is set.
+	sel, err := c.Select("INBOX", nil).Wait()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if n := c.Mailbox().NumMessages; n != 2 {
+	if n := sel.NumMessages; n != 2 {
 		t.Fatalf("SELECT shows %d messages, want 2 (the held one hidden)", n)
 	}
 

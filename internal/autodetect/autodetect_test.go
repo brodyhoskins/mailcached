@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -73,10 +74,10 @@ func TestISPDBThroughMX(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.IMAP.Upstream != up("mail.gandi.net:993", config.TLSImplicit) || r.IMAP.From != "ispdb gandi.net" {
+	if !reflect.DeepEqual(r.IMAP.Upstream, up("mail.gandi.net:993", config.TLSImplicit)) || r.IMAP.From != "ispdb gandi.net" {
 		t.Errorf("imap = %+v", r.IMAP)
 	}
-	if r.SMTP.Upstream != up("smtp.next.example:465", config.TLSImplicit) {
+	if !reflect.DeepEqual(r.SMTP.Upstream, up("smtp.next.example:465", config.TLSImplicit)) {
 		t.Errorf("smtp = %+v", r.SMTP)
 	}
 }
@@ -103,10 +104,10 @@ func TestOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.IMAP.Upstream != up("imap.example.com:993", config.TLSImplicit) || r.IMAP.From != "srv example.com" {
+	if !reflect.DeepEqual(r.IMAP.Upstream, up("imap.example.com:993", config.TLSImplicit)) || r.IMAP.From != "srv example.com" {
 		t.Errorf("imap = %+v", r.IMAP)
 	}
-	if r.SMTP.Upstream != up("smtp.example.com:587", config.TLSStartTLS) {
+	if !reflect.DeepEqual(r.SMTP.Upstream, up("smtp.example.com:587", config.TLSStartTLS)) {
 		t.Errorf("smtp = %+v", r.SMTP)
 	}
 }
@@ -129,10 +130,10 @@ func TestAutodiscover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.IMAP.Upstream != up("mail.ex.example:993", config.TLSImplicit) || r.IMAP.From != "autodiscover ex.example" {
+	if !reflect.DeepEqual(r.IMAP.Upstream, up("mail.ex.example:993", config.TLSImplicit)) || r.IMAP.From != "autodiscover ex.example" {
 		t.Errorf("imap = %+v", r.IMAP)
 	}
-	if r.SMTP.Upstream != up("mail.ex.example:587", config.TLSStartTLS) {
+	if !reflect.DeepEqual(r.SMTP.Upstream, up("mail.ex.example:587", config.TLSStartTLS)) {
 		t.Errorf("smtp = %+v", r.SMTP)
 	}
 }

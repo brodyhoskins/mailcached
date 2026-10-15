@@ -54,6 +54,7 @@ type Server struct {
 	push pushes
 
 	uploads uploads
+	gates   gates
 	subMu   sync.Mutex
 	subs    map[string]*submissions // by login
 
@@ -187,7 +188,15 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		cw, done := httpenc.Wrap(w, r)
-		h(cw, r.WithContext(context.WithValue(r.Context(), clientKey{}, c)))
+		// Deferred: a handler that panics still gives its room back.
+		var after []func()
+		defer func() {
+			for _, f := range after {
+				f()
+			}
+		}()
+		ctx := context.WithValue(r.Context(), clientKey{}, c)
+		h(cw, r.WithContext(context.WithValue(ctx, afterKey{}, &after)))
 		if err := done(); err != nil {
 			s.Log.Debug("jmap: response", "err", err)
 		}
@@ -274,11 +283,12 @@ func (s *Server) serveSession(w http.ResponseWriter, r *http.Request) {
 	state := c.acct.State()
 	c.acct.Unlock()
 	empty := json.RawMessage("{}")
+	n := limit(c)
 	sess := jmap.Session{
 		Capabilities: map[string]json.RawMessage{
 			jmap.CapCore: mustJSON(jmap.CoreCapability{
-				MaxSizeUpload: s.maxMessage(), MaxConcurrentUpload: 4, MaxSizeRequest: maxRequest,
-				MaxConcurrentRequests: 8, MaxCallsInRequest: maxCalls, MaxObjectsInGet: maxObjectsInGet,
+				MaxSizeUpload: s.maxMessage(), MaxConcurrentUpload: n, MaxSizeRequest: maxRequest,
+				MaxConcurrentRequests: n, MaxCallsInRequest: maxCalls, MaxObjectsInGet: maxObjectsInGet,
 				MaxObjectsInSet: maxObjectsInSet, CollationAlgorithms: []string{"i;ascii-casemap", "i;unicode-casemap"},
 			}),
 			jmap.CapMail:       empty,
@@ -302,7 +312,7 @@ func (s *Server) serveSession(w http.ResponseWriter, r *http.Request) {
 		DownloadURL:     base + "/jmap/download/{accountId}/{blobId}/{name}?type={type}",
 		UploadURL:       base + "/jmap/upload/{accountId}/",
 		EventSourceURL:  base + "/jmap/eventsource?types={types}&closeafter={closeafter}&ping={ping}",
-		State:           jmap.State(sessionState(state)),
+		State:           jmap.State(sessionState(state, n)),
 	}
 	if p, err := s.pushState(); err == nil {
 		sess.Capabilities[capVAPID] = mustJSON(map[string]string{"applicationServerKey": p.vapid.PublicKey()})
@@ -310,13 +320,6 @@ func (s *Server) serveSession(w http.ResponseWriter, r *http.Request) {
 		s.Log.Warn("jmap: push subscriptions are off", "err", err)
 	}
 	writeJSON(w, http.StatusOK, sess)
-}
-
-// sessionState is the session's state: the session resource changes only
-// with the server's version, so it is the log's epoch.
-func sessionState(accountState string) string {
-	epoch, _, _ := strings.Cut(accountState, "-")
-	return epoch
 }
 
 func mustJSON(v any) json.RawMessage {

@@ -183,12 +183,16 @@ func (req *request) sync() (*node, error) {
 			return el("AirSync:Sync", el("AirSync:Collections", out...)), nil
 		}
 		// Nothing yet: wait for a change.
+		req.idle()
 		t := time.NewTimer(time.Until(deadline))
 		select {
 		case <-changed:
 			t.Stop()
 			// Let a burst of changes settle.
 			time.Sleep(time.Second)
+			if req.busy() != nil {
+				return nil, nil
+			}
 		case <-t.C:
 			return nil, nil // an empty answer: no changes
 		case <-req.s.quitting():

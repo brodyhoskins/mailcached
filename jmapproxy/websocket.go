@@ -20,10 +20,6 @@ import (
 	"github.com/brodyhoskins/mailcached/internal/jmap"
 )
 
-// wsConcurrent is how many requests of one WebSocket run at once
-// (maxConcurrentRequests).
-const wsConcurrent = 8
-
 func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request) {
 	c, ok := s.authenticate(w, r)
 	if !ok {
@@ -71,7 +67,6 @@ type wsConn struct {
 }
 
 func (w *wsConn) serve(ctx context.Context) {
-	sem := make(chan struct{}, wsConcurrent)
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	defer w.pushOff()
@@ -94,10 +89,14 @@ func (w *wsConn) serve(ctx context.Context) {
 		}
 		switch head.Type {
 		case "Request":
-			sem <- struct{}{}
+			// The next message waits for room, as over HTTP.
+			leave, err := w.s.enter(ctx, w.c)
+			if err != nil {
+				return
+			}
 			wg.Add(1)
 			go func() {
-				defer func() { <-sem; wg.Done() }()
+				defer func() { leave(); wg.Done() }()
 				w.request(head.ID, data)
 			}()
 		case "WebSocketPushEnable":

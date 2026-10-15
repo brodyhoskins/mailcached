@@ -110,6 +110,7 @@ func destinationError(err error) error {
 // the change for the provider, so clients never wait on it.
 
 func (s *Session) Store(w *imapserver.FetchWriter, numSet imap.NumSet, flags *imap.StoreFlags, options *imap.StoreOptions) error {
+	defer busy()()
 	if s.mbox == nil {
 		return errNotSelected
 	}
@@ -164,6 +165,7 @@ func (s *Session) writeFlags(w *imapserver.FetchWriter, targets []target) error 
 // EXPUNGE responses go out through the mailbox tracker when the command
 // completes.
 func (s *Session) Expunge(w *imapserver.ExpungeWriter, uids *imap.UIDSet) error {
+	defer busy()()
 	if s.mbox == nil {
 		return errNotSelected
 	}
@@ -193,6 +195,7 @@ func copyData(done []engine.Copied, validity uint32) *imap.CopyData {
 }
 
 func (s *Session) Copy(numSet imap.NumSet, dest string) (*imap.CopyData, error) {
+	defer busy()()
 	if s.mbox == nil {
 		return nil, errNotSelected
 	}
@@ -214,6 +217,7 @@ func (s *Session) Copy(numSet imap.NumSet, dest string) (*imap.CopyData, error) 
 }
 
 func (s *Session) Move(w *imapserver.MoveWriter, numSet imap.NumSet, dest string) error {
+	defer busy()()
 	if s.mbox == nil {
 		return errNotSelected
 	}

@@ -20,6 +20,7 @@ import (
 // the proxy downloads them once and searches them itself; later searches
 // hit the cache.
 func (s *Session) Search(kind imapserver.NumKind, criteria *imap.SearchCriteria, options *imap.SearchOptions) (*imap.SearchData, error) {
+	defer busy()()
 	if s.mbox == nil {
 		return nil, errNotSelected
 	}

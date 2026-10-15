@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/brodyhoskins/mailcached/internal/gate"
 	"github.com/brodyhoskins/mailcached/internal/wbxml"
 )
 
@@ -69,10 +70,15 @@ type Client struct {
 	// PolicyKeySaved, if not nil, is called with each new policy key, so
 	// it is kept across restarts.
 	PolicyKeySaved func(key string)
+	// MaxConcurrent caps the commands at a time, Ping included. 0: no
+	// cap.
+	MaxConcurrent int
 
 	mu        sync.Mutex
 	version   string
 	policyKey string
+	running   gate.Gate
+	backoff   gate.Backoff // after a 503 or 429
 }
 
 // SetPolicyKey sets the key saved from before.
@@ -113,10 +119,14 @@ func (c *Client) Options(ctx context.Context) error {
 		return err
 	}
 	c.prepare(req)
+	if err := c.backoff.Wait(ctx); err != nil {
+		return fmt.Errorf("activesync: OPTIONS: %w", err)
+	}
 	res, err := c.httpClient().Do(req)
 	if err != nil {
 		return err
 	}
+	c.backoff.Note(res.StatusCode, res.Header.Get("Retry-After"))
 	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 64<<10))
 	res.Body.Close()
 	if err := httpErr("OPTIONS", res.StatusCode); err != nil {
@@ -218,11 +228,23 @@ func (c *Client) do(ctx context.Context, cmd string, params url.Values, body []b
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", contentType)
 	}
+	// The backoff is checked with a slot held: a command that waited for
+	// one sees a pause the command before it was told of.
+	if c.MaxConcurrent > 0 {
+		if err := c.running.Enter(ctx, c.MaxConcurrent); err != nil {
+			return nil, err
+		}
+		defer c.running.Leave()
+	}
+	if err := c.backoff.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("activesync: %s: %w", cmd, err)
+	}
 	res, err := c.httpClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer res.Body.Close()
+	c.backoff.Note(res.StatusCode, res.Header.Get("Retry-After"))
 	if res.StatusCode == 449 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 64<<10))
 		return nil, errProvision

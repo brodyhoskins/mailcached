@@ -112,11 +112,12 @@ func (p *jmapProvider) timeout() time.Duration {
 
 func (p *jmapProvider) newClient(password string) *jmap.Client {
 	tr := &http.Transport{
-		DialContext:         netbind.Dialer(p.u.Source, p.timeout(), dialControl(p.timeout())).DialContext,
+		DialContext:         netbind.NewSpread(p.u.Sources, p.timeout(), dialControl(p.timeout(), true)).DialContext,
 		ForceAttemptHTTP2:   true,
 		TLSClientConfig:     p.u.TLSConfig,
 		TLSHandshakeTimeout: 10 * time.Second,
 		IdleConnTimeout:     90 * time.Second,
+		MaxConnsPerHost:     p.u.MaxConns,
 		// The client asks for zstd and gzip itself.
 		DisableCompression: true,
 	}
@@ -127,8 +128,13 @@ func (p *jmapProvider) newClient(password string) *jmap.Client {
 	if p.a.b.Version != "" {
 		ua += "/" + p.a.b.Version
 	}
-	return &jmap.Client{HTTP: &http.Client{Transport: tr}, SessionURL: p.u.URL, User: p.a.login, Secret: password,
+	c := &jmap.Client{HTTP: &http.Client{Transport: tr}, SessionURL: p.u.URL, User: p.a.login, Secret: password,
 		Bearer: p.u.Bearer, UserAgent: ua}
+	if p.u.MaxConns > 0 {
+		// The push stream holds one of the connections.
+		c.MaxConcurrent = max(1, p.u.MaxConns-1)
+	}
+	return c
 }
 
 func (p *jmapProvider) Login(password string) error {
@@ -181,6 +187,16 @@ func (p *jmapProvider) session(ctx context.Context) (*jmap.Client, jmap.ID, erro
 func (p *jmapProvider) Conn(priority, string) (conn, error) { return &jmapConn{p: p}, nil }
 
 func (p *jmapProvider) Close() {}
+
+func (p *jmapProvider) Capacity() int {
+	p.mu.Lock()
+	c := p.client
+	p.mu.Unlock()
+	if c == nil {
+		return max(0, p.u.MaxConns-1)
+	}
+	return c.Capacity()
+}
 
 // refused turns a JMAP refusal into an *imap.Error, which the engine
 // treats as the provider saying no. Anything else stays an error to retry.

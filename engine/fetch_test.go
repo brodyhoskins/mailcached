@@ -78,7 +78,7 @@ func fetchEnv(t *testing.T, n int, open chan struct{}) (*Account, []*Message, *f
 	t.Cleanup(func() { st.Close() })
 	b := &Engine{Store: st, Timeout: 5 * time.Second, Cache: &Cache{MaxBytes: 1 << 20}, Log: testLog,
 		Route: func(string) (Upstream, bool) {
-			return Upstream{Addr: addr, TLS: config.TLSNone, Timeout: 5 * time.Second}, true
+			return Upstream{Addr: addr, TLS: config.TLSNone, Timeout: 5 * time.Second, MaxConns: 6}, true
 		}}
 	t.Cleanup(b.Close)
 	a := b.Account(enginetest.User)
@@ -191,7 +191,7 @@ func TestClientTakesOver(t *testing.T) {
 func TestClientBatchInteractive(t *testing.T) {
 	a, msgs, _ := fetchEnv(t, 6, nil)
 	var held []conn
-	for range poolSize {
+	for range bulkSlots(a) {
 		pc, err := a.conn(bulk, "INBOX")
 		if err != nil {
 			t.Fatal(err)

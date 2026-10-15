@@ -55,9 +55,9 @@ type Upstream struct {
 	TLSConfig *tls.Config
 	Helo      string
 	Timeout   time.Duration
-	// Source is where the connection leaves from: an interface name or a
-	// local IP address. Empty: wherever routing says.
-	Source string
+	// Sources are where connections may leave from, in turn: interface
+	// names or local IP addresses. None: wherever routing says.
+	Sources []string
 	// Provider, if not nil, takes the place of the submission server: for
 	// a provider that has none (JMAP).
 	Provider Provider
@@ -373,9 +373,26 @@ func (u *Upstream) verify(username, password string) error {
 	return nil
 }
 
+// spreads holds a Spread for each upstream server and its sources, so
+// successive connections take turns over the sources.
+var spreads sync.Map // spreadKey -> *netbind.Spread
+
+type spreadKey struct {
+	addr, sources string
+	timeout       time.Duration
+}
+
+func (u *Upstream) spread() *netbind.Spread {
+	k := spreadKey{u.Addr, fmt.Sprintf("%q", u.Sources), u.Timeout}
+	if s, ok := spreads.Load(k); ok {
+		return s.(*netbind.Spread)
+	}
+	s, _ := spreads.LoadOrStore(k, netbind.NewSpread(u.Sources, u.Timeout, nil))
+	return s.(*netbind.Spread)
+}
+
 func (u *Upstream) dial(ctx context.Context) (*smtp.Client, error) {
-	d := netbind.Dialer(u.Source, u.Timeout, nil)
-	conn, err := d.DialContext(ctx, "tcp", u.Addr)
+	conn, err := u.spread().DialContext(ctx, "tcp", u.Addr)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", u.Addr, err)
 	}

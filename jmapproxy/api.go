@@ -63,6 +63,14 @@ var methods = map[string]struct {
 var known = []string{jmap.CapCore, jmap.CapMail, jmap.CapSubmission}
 
 func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
+	// The request holds its room from before its body is read until its
+	// answer is written.
+	c := clientOf(r)
+	leave, err := s.hold(w, r, c)
+	if err != nil {
+		return
+	}
+	defer leave()
 	body, err := httpenc.ReadAll(r.Header.Get("Content-Encoding"), r.Body, maxRequest)
 	if errors.Is(err, httpenc.ErrTooLarge) {
 		writeProblem(w, &jmap.ProblemDetails{Type: jmap.ProblemLimit, Status: 400, Limit: "maxSizeRequest"})
@@ -77,7 +85,7 @@ func (s *Server) serveAPI(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, p)
 		return
 	}
-	res, p := s.execute(r, clientOf(r), &req)
+	res, p := s.execute(r, c, &req)
 	if p != nil {
 		writeProblem(w, p)
 		return
@@ -118,7 +126,7 @@ func (s *Server) execute(r *http.Request, c *client, req *jmap.Request) (*jmap.R
 		out = append(out, extra...)
 	}
 	c.acct.Lock()
-	state := sessionState(c.acct.State())
+	state := sessionState(c.acct.State(), limit(c))
 	c.acct.Unlock()
 	res := &jmap.Response{MethodResponses: out, SessionState: jmap.State(state)}
 	if req.CreatedIDs != nil {

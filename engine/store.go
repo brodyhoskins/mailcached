@@ -150,6 +150,9 @@ CREATE TABLE IF NOT EXISTS changes (
 // safeName matches logins usable as a folder name as they are.
 var safeName = regexp.MustCompile(`^[a-z0-9][a-z0-9._+@-]*$`)
 
+// hashName matches the folder name accountDir makes from a hash.
+var hashName = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
 // accountDir is the folder of an account's state and cached messages.
 // A login that is not a safe file name is named by its hash.
 func accountDir(root, login string) string {

@@ -149,6 +149,11 @@ func (s *Server) serveDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No such account", http.StatusNotFound)
 		return
 	}
+	leave, err := s.hold(w, r, c)
+	if err != nil {
+		return
+	}
+	defer leave() // until the blob is written
 	data, typ, err := s.blob(c, r.PathValue("blob"))
 	if errors.Is(err, errNoBlob) {
 		http.Error(w, "No such blob", http.StatusNotFound)
@@ -181,6 +186,11 @@ func (s *Server) serveUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No such account", http.StatusNotFound)
 		return
 	}
+	leave, err := s.hold(w, r, c)
+	if err != nil {
+		return
+	}
+	defer leave()
 	data, err := httpenc.ReadAll(r.Header.Get("Content-Encoding"), r.Body, s.maxMessage())
 	if errors.Is(err, httpenc.ErrTooLarge) {
 		w.Header().Set("Content-Type", "application/problem+json")

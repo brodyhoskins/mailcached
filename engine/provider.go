@@ -30,6 +30,10 @@ type provider interface {
 	Watch(notify func()) (watchConn, error)
 	// Close closes the idle connections.
 	Close()
+	// Capacity returns the requests the provider takes at once now, 0 for
+	// no known limit. It falls when the provider pushes back, and rises
+	// again when the pushback ends.
+	Capacity() int
 }
 
 // conn is a connection to the provider. The folder names are the

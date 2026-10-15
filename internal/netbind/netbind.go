@@ -39,7 +39,8 @@ func Interface(name string) *net.Interface {
 
 // Listen listens for TCP on addr, host:port, where host is an IP address,
 // a host name, an interface name, or empty for every address. Clients
-// that have Multipath TCP get it where the system does (Linux).
+// that have Multipath TCP or TCP Fast Open get them where the system does
+// (Linux).
 func Listen(ctx context.Context, addr string) (net.Listener, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -47,8 +48,7 @@ func Listen(ctx context.Context, addr string) (net.Listener, error) {
 	}
 	ifc := Interface(host)
 	if ifc == nil {
-		var lc net.ListenConfig
-		lc.SetMultipathTCP(true)
+		lc := listenConfig(nil)
 		return lc.Listen(ctx, "tcp", addr)
 	}
 	if bindsDevice {
@@ -56,10 +56,7 @@ func Listen(ctx context.Context, addr string) (net.Listener, error) {
 		var ls []net.Listener
 		var errs []error
 		for _, nw := range []string{"tcp4", "tcp6"} {
-			lc := net.ListenConfig{Control: func(network, _ string, c syscall.RawConn) error {
-				return onFD(c, func(fd int) error { return bindDevice(fd, network, ifc) })
-			}}
-			lc.SetMultipathTCP(true)
+			lc := listenConfig(func(network string, fd int) error { return bindDevice(fd, network, ifc) })
 			l, err := lc.Listen(ctx, nw, net.JoinHostPort("", port))
 			if err != nil {
 				errs = append(errs, err)
@@ -78,8 +75,7 @@ func Listen(ctx context.Context, addr string) (net.Listener, error) {
 	}
 	var ls []net.Listener
 	for _, ip := range ips {
-		var lc net.ListenConfig
-		lc.SetMultipathTCP(true)
+		lc := listenConfig(nil)
 		l, err := lc.Listen(ctx, "tcp", net.JoinHostPort(ip.String(), port))
 		if err != nil {
 			for _, l := range ls {
@@ -90,6 +86,22 @@ func Listen(ctx context.Context, addr string) (net.Listener, error) {
 		ls = append(ls, l)
 	}
 	return Multi(ls), nil
+}
+
+// listenConfig returns the configuration for a listener: Multipath TCP,
+// TCP Fast Open, and bind, if not nil, on the socket.
+func listenConfig(bind func(network string, fd int) error) net.ListenConfig {
+	lc := net.ListenConfig{Control: func(network, _ string, c syscall.RawConn) error {
+		return onFD(c, func(fd int) error {
+			fastOpen(fd)
+			if bind != nil {
+				return bind(network, fd)
+			}
+			return nil
+		})
+	}}
+	lc.SetMultipathTCP(true)
+	return lc
 }
 
 // addrs returns an interface's addresses, without link-local ones.
