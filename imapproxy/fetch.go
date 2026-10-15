@@ -54,6 +54,7 @@ func headerOnly(o *imap.FetchOptions) bool {
 // for many messages starts getting them at once. FETCH responses may come
 // in any order.
 func (s *Session) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, options *imap.FetchOptions) error {
+	defer busy()()
 	if s.mbox == nil {
 		return errNotSelected
 	}

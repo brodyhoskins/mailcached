@@ -9,12 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/brodyhoskins/mailcached/internal/gate"
 	"github.com/brodyhoskins/mailcached/internal/httpenc"
 	"time"
 )
@@ -29,9 +31,63 @@ type Client struct {
 	UserAgent  string
 	// MaxBody limits a decoded response or download. Default 64 MiB.
 	MaxBody int64
+	// MaxConcurrent caps the API requests, uploads and downloads at a
+	// time, together. The session's maxConcurrentRequests and
+	// maxConcurrentUpload cap their kind as well. 0: no cap of its own.
+	MaxConcurrent int
 
 	mu      sync.Mutex
 	session *Session
+	// Requests running: by kind, and in all.
+	api, upload, download, all gate.Gate
+	backoff                    gate.Backoff // after a 503 or 429
+}
+
+// Capacity returns the API requests the client sends at once, 0 for no
+// limit: MaxConcurrent, or the session's maxConcurrentRequests if lower.
+func (c *Client) Capacity() int {
+	c.mu.Lock()
+	s := c.session
+	c.mu.Unlock()
+	n := c.MaxConcurrent
+	if s != nil {
+		if m := s.Core().MaxConcurrentRequests; m > 0 && (n <= 0 || m < n) {
+			n = m
+		}
+	}
+	return max(n, 0)
+}
+
+// enter waits for room for one more request: in g, up to the server's
+// limit for its kind in the latest session (s while none is cached; 0
+// for none), and up to MaxConcurrent in all.
+func (c *Client) enter(ctx context.Context, g *gate.Gate, s *Session, kind func(CoreCapability) int) (leave func(), err error) {
+	limit := func() int {
+		c.mu.Lock()
+		if c.session != nil {
+			s = c.session
+		}
+		c.mu.Unlock()
+		if n := kind(s.Core()); n > 0 {
+			return n
+		}
+		return math.MaxInt
+	}
+	if err := g.EnterFunc(ctx, limit); err != nil {
+		return nil, err
+	}
+	if c.MaxConcurrent > 0 {
+		if err := c.all.Enter(ctx, c.MaxConcurrent); err != nil {
+			g.Leave()
+			return nil, err
+		}
+	}
+	return func() {
+		if c.MaxConcurrent > 0 {
+			c.all.Leave()
+		}
+		g.Leave()
+	}, nil
 }
 
 // ErrUnauthorized means the server rejected the credentials.
@@ -92,10 +148,14 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	if c.UserAgent != "" {
 		req.Header.Set("User-Agent", c.UserAgent)
 	}
+	if err := c.backoff.Wait(req.Context()); err != nil {
+		return nil, fmt.Errorf("jmap: %w", err)
+	}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, err
 	}
+	c.backoff.Note(resp.StatusCode, resp.Header.Get("Retry-After"))
 	switch resp.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		resp.Body.Close()
@@ -205,11 +265,17 @@ func (c *Client) Call(ctx context.Context, r *Request) (*Response, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.do(req)
+	leave, err := c.enter(ctx, &c.api, s, func(cc CoreCapability) int { return cc.MaxConcurrentRequests })
 	if err != nil {
 		return nil, err
 	}
+	resp, err := c.do(req)
+	if err != nil {
+		leave()
+		return nil, err
+	}
 	out, err := c.readBody(resp)
+	leave()
 	if err != nil {
 		return nil, err
 	}
@@ -349,11 +415,17 @@ func (c *Client) Upload(ctx context.Context, account ID, contentType string, dat
 		return nil, err
 	}
 	req.Header.Set("Content-Type", contentType)
-	resp, err := c.do(req)
+	leave, err := c.enter(ctx, &c.upload, s, func(cc CoreCapability) int { return cc.MaxConcurrentUpload })
 	if err != nil {
 		return nil, err
 	}
+	resp, err := c.do(req)
+	if err != nil {
+		leave()
+		return nil, err
+	}
 	body, err := c.readBody(resp)
+	leave()
 	if err != nil {
 		return nil, err
 	}
@@ -382,11 +454,17 @@ func (c *Client) Download(ctx context.Context, account, blob ID) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.do(req)
+	leave, err := c.enter(ctx, &c.download, s, func(CoreCapability) int { return 0 })
 	if err != nil {
 		return nil, err
 	}
+	resp, err := c.do(req)
+	if err != nil {
+		leave()
+		return nil, err
+	}
 	body, err := c.readBody(resp)
+	leave()
 	if err != nil {
 		return nil, err
 	}

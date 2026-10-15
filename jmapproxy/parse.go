@@ -215,7 +215,8 @@ func partsOfRaw(raw []byte) *part {
 		return &part{partID: "1", typ: "text/plain", size: int64(len(raw))}
 	}
 	hdr, _, _ := bytes.Cut(raw, []byte("\r\n\r\n"))
-	return entityPart(e, splitHeader(append(hdr, "\r\n"...)), "")
+	// A copy: raw is shared, and append would write into it.
+	return entityPart(e, splitHeader(append(hdr[:len(hdr):len(hdr)], "\r\n"...)), "")
 }
 
 func entityPart(e *gomessage.Entity, fields []field, prefix string) *part {

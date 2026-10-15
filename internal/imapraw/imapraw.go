@@ -71,7 +71,9 @@ func (h *Conn) HasCap(name string) bool {
 	return false
 }
 
-// Greeting reads the server greeting, reporting whether it's PREAUTH.
+// Greeting reads the server greeting, reporting whether it's PREAUTH. A
+// server that turns the connection away (* BYE, as for too many
+// connections) gives an *imap.Error.
 func (h *Conn) Greeting() (preauth bool, err error) {
 	line, err := h.ReadResponse()
 	if err != nil {
@@ -83,6 +85,8 @@ func (h *Conn) Greeting() (preauth bool, err error) {
 		return false, nil
 	case strings.HasPrefix(line, "* PREAUTH"):
 		return true, nil
+	case strings.HasPrefix(line, "* BYE"):
+		return false, &imap.Error{Type: imap.StatusResponseTypeBye, Text: strings.TrimSpace(strings.TrimPrefix(line, "* BYE"))}
 	}
 	return false, fmt.Errorf("unexpected greeting %q", line)
 }

@@ -31,6 +31,7 @@ import (
 	"github.com/brodyhoskins/mailcached/internal/autodetect"
 	"github.com/brodyhoskins/mailcached/internal/certs"
 	"github.com/brodyhoskins/mailcached/internal/fscompress"
+	"github.com/brodyhoskins/mailcached/internal/load"
 	"github.com/brodyhoskins/mailcached/internal/netbind"
 	"github.com/brodyhoskins/mailcached/jmapproxy"
 	"github.com/brodyhoskins/mailcached/smtpproxy"
@@ -125,17 +126,28 @@ func Main(p Program, args []string, stdout, stderr io.Writer) int {
 	}
 	// source is where connections to u leave from: its own source, or
 	// upstream_source for a server autodetect found.
-	source := func(u config.Upstream) string {
-		if u.Source != "" {
+	source := func(u config.Upstream) []string {
+		if len(u.Source) > 0 {
 			return u.Source
 		}
 		return bc.UpstreamSource
+	}
+	maxConns := func(u config.Upstream) int {
+		if u.MaxConnections != 0 {
+			return u.MaxConnections
+		}
+		return bc.UpstreamMaxConnections
 	}
 	// route picks the provider for a login: the matching account, or else
 	// the servers autodetect finds for its domain.
 	var detector *autodetect.Detector
 	if *bc.Autodetect {
-		detector = autodetect.New(log, token, bc.UpstreamSource)
+		// Lookups leave from the first source.
+		var first string
+		if len(bc.UpstreamSource) > 0 {
+			first = bc.UpstreamSource[0]
+		}
+		detector = autodetect.New(log, token, first)
 		detector.JMAP = bc.AutodetectJMAP != "off"
 		detector.ActiveSync = bc.AutodetectActiveSync != "off"
 	}
@@ -281,11 +293,11 @@ func Main(p Program, args []string, stdout, stderr io.Writer) int {
 			kind, u, ok := mailRoute(login)
 			switch kind {
 			case "jmap":
-				return engine.Upstream{URL: u.Upstream, Bearer: u.Auth == "bearer", Source: source(u), Timeout: bc.IMAP.Timeout}, ok
+				return engine.Upstream{URL: u.Upstream, Bearer: u.Auth == "bearer", Sources: source(u), MaxConns: maxConns(u), Timeout: bc.IMAP.Timeout}, ok
 			case "activesync":
-				return engine.Upstream{ActiveSync: u.Upstream, Source: source(u), Timeout: bc.IMAP.Timeout}, ok
+				return engine.Upstream{ActiveSync: u.Upstream, Sources: source(u), MaxConns: maxConns(u), Timeout: bc.IMAP.Timeout}, ok
 			}
-			return engine.Upstream{Addr: u.Upstream, TLS: u.UpstreamTLS, Source: source(u), Timeout: bc.IMAP.Timeout}, ok
+			return engine.Upstream{Addr: u.Upstream, TLS: u.UpstreamTLS, Sources: source(u), MaxConns: maxConns(u), Timeout: bc.IMAP.Timeout}, ok
 		},
 		Timeout:   bc.IMAP.Timeout,
 		Transform: hooks.Transform,
@@ -296,6 +308,7 @@ func Main(p Program, args []string, stdout, stderr io.Writer) int {
 		Log:       log,
 	}
 	defer eng.Close()
+	eng.Preload()
 	if hooks.Started != nil {
 		hooks.Started(eng)
 	}
@@ -331,7 +344,7 @@ func Main(p Program, args []string, stdout, stderr io.Writer) int {
 					return smtpproxy.Upstream{Provider: providerSender{eng}, Timeout: bc.SMTP.Timeout}, true
 				}
 			}
-			return smtpproxy.Upstream{Addr: u.Upstream, TLS: u.UpstreamTLS, Source: source(u), Helo: bc.SMTP.Hostname, Timeout: bc.SMTP.Timeout}, ok
+			return smtpproxy.Upstream{Addr: u.Upstream, TLS: u.UpstreamTLS, Sources: source(u), Helo: bc.SMTP.Hostname, Timeout: bc.SMTP.Timeout}, ok
 		},
 		Filter:          hooks.Filter,
 		Domain:          bc.SMTP.Hostname,
@@ -394,6 +407,10 @@ func Main(p Program, args []string, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	load.Start(ctx, log)
+	if h := netbind.FastOpenHint(); h != "" {
+		log.Info("tcp fast open", "hint", h)
+	}
 	errc := make(chan error, len(services))
 	for _, s := range services {
 		go func() { errc <- fmt.Errorf("%s: %w", s.name, s.serve(s.l)) }()

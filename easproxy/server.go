@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/brodyhoskins/mailcached/engine"
+	"github.com/brodyhoskins/mailcached/internal/load"
 	"github.com/brodyhoskins/mailcached/smtpproxy"
 )
 
@@ -207,6 +208,25 @@ type request struct {
 	params     map[string]string // the query's other parameters
 	body       []byte
 	doc        *node // the WBXML body, nil if none
+	held       bool  // the request holds room in the process (load)
+}
+
+// idle gives back the request's room in the process while it waits for
+// changes.
+func (req *request) idle() {
+	if req.held {
+		load.Default.Leave()
+		req.held = false
+	}
+}
+
+// busy takes room in the process again after a wait.
+func (req *request) busy() error {
+	if err := load.Default.Enter(req.r.Context()); err != nil {
+		return err
+	}
+	req.held = true
+	return nil
 }
 
 // errStatus is a command's failure, as the command's own Status.
@@ -251,6 +271,28 @@ func (s *Server) serveEAS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "DeviceId is required", http.StatusBadRequest)
 		return
 	}
+	// A request holds room in the process while it works, from before it
+	// reads its body, not while it waits for changes: a Sync gives it back
+	// to wait (idle), and a Ping does little else.
+	if req.cmd != "Ping" {
+		if err := req.busy(); err != nil {
+			return
+		}
+		defer req.idle()
+	}
+	// A client that stalls its body, or stops reading the answer, cannot
+	// keep the room. A Sync or Ping may wait for changes first: its answer
+	// gets its deadline once the wait is over.
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(5 * time.Minute))
+	writeBy := func() { _ = rc.SetWriteDeadline(time.Now().Add(5 * time.Minute)) }
+	if req.cmd != "Sync" && req.cmd != "Ping" {
+		writeBy()
+	}
+	defer func() { // not for the connection's next request
+		_ = rc.SetReadDeadline(time.Time{})
+		_ = rc.SetWriteDeadline(time.Time{})
+	}()
 	if req.body, err = io.ReadAll(io.LimitReader(r.Body, maxRequest)); err != nil {
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
@@ -296,6 +338,7 @@ func (s *Server) serveEAS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Command not supported", http.StatusNotImplemented)
 		return
 	}
+	writeBy()
 	if err != nil {
 		var hs httpStatus
 		if errors.As(err, &hs) {

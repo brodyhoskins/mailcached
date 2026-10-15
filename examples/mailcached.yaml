@@ -47,11 +47,27 @@ tls:
 # listen_addresses: [eth0, tailscale0]
 
 # Where connections to providers leave from, for an upstream without its
-# own source: an interface name (wg0, eth1) or a local IP address. Empty:
+# own source: an interface name (wg0, eth1) or a local IP address, or a
+# list of them. With a list, connections take each in turn, and an IMAP
+# server that caps the connections from one address allows more. Empty:
 # wherever routing says. An interface must route to the provider (for
 # WireGuard, AllowedIPs must cover it). Without a source, connections use
 # MPTCP on Linux when the provider has it.
-# upstream_source: wg0
+# upstream_source: wg0           # or a list: [wg0, eth1]
+
+# Each account opens IMAP connections to its provider as requests need
+# them, and closes the ones unused for 5 minutes. If the provider refuses
+# a connection or does not answer, mailcached stays at the connections
+# it has for 10 minutes. Each source address learns its own limit. When
+# one account reaches the limit, an account with at least 2 more
+# connections from the same address gives one up. A JMAP provider's
+# maxConcurrentRequests limits its requests at a time. mailcached waits
+# when a JMAP or ActiveSync provider asks it to (HTTP 503 or 429).
+# upstream_max_connections sets a cap of your own: connections for IMAP,
+# requests at a time for JMAP and ActiveSync, counting the one that
+# waits for new mail. An upstream can set its own max_connections.
+# Default 0: no cap.
+# upstream_max_connections: 0
 
 # Where clients connect. Clients log in with their provider user name and
 # password. mailcached passes them to the provider and keeps them in memory
@@ -121,7 +137,8 @@ accounts:
       upstream: smtp.example.com:465
       upstream_tls: implicit
   - match: "alice@example.org"
-    imap: {upstream: "mail.example.org:993", source: wg0}   # leaves through wg0
+    # leaves through wg0, with at most 3 connections
+    imap: {upstream: "mail.example.org:993", source: wg0, max_connections: 3}
     smtp: {upstream: "mail.example.org:587", upstream_tls: starttls}
   # A JMAP provider: the account's mail comes from it, and imap is not
   # used. Without smtp, mail clients send through JMAP too. With auth:

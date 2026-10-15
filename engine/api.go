@@ -150,6 +150,7 @@ func (a *Account) MailboxFor(name string) (*Mailbox, error) {
 	m := a.boxes[CanonicalName(name)]
 	stale := m == nil || time.Since(m.synced) > SelectFresh
 	wait := m == nil || m.synced.IsZero() || SelectWaits
+	ok := m != nil && m.selectable
 	a.mu.Unlock()
 	if stale && !wait {
 		a.syncLater(name)
@@ -163,9 +164,10 @@ func (a *Account) MailboxFor(name string) (*Mailbox, error) {
 		}
 		a.mu.Lock()
 		m = a.boxes[CanonicalName(name)]
+		ok = m != nil && m.selectable
 		a.mu.Unlock()
 	}
-	if m == nil || !m.selectable {
+	if !ok {
 		return nil, ErrNoMailbox
 	}
 	return m, nil
@@ -613,6 +615,18 @@ func (a *Account) EmailIDs() []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+// Capacity returns the requests the account's provider takes at once
+// now, 0 for no known limit.
+func (a *Account) Capacity() int {
+	a.credMu.Lock()
+	p := a.prov
+	a.credMu.Unlock()
+	if p == nil {
+		return 0
+	}
+	return p.Capacity()
 }
 
 // State returns the account's state: it changes whenever anything a

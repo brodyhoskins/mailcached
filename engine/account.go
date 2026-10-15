@@ -8,7 +8,10 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"maps"
 	"net/textproto"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -42,8 +45,9 @@ import (
 
 // Account is one provider Account.
 type Account struct {
-	b     *Engine
-	login string // lowercased
+	b      *Engine
+	login  string        // lowercased
+	loaded chan struct{} // closed once the saved state is restored
 
 	// mu guards the mailbox state below, every mailbox in boxes, and every
 	// message.
@@ -188,18 +192,35 @@ type Message struct {
 	held bool
 }
 
-// account returns the account for login, loading its saved state.
+// account returns the account for login, once its saved state is
+// loaded. The load holds no lock of the engine's: other accounts do not
+// wait for it, only requests for this one.
 func (b *Engine) account(login string) *Account {
 	login = strings.ToLower(login)
 	b.syncMu.Lock()
-	defer b.syncMu.Unlock()
-	if a := b.accounts[login]; a != nil {
+	a := b.accounts[login]
+	if a != nil {
+		b.syncMu.Unlock()
+		<-a.loaded
 		return a
 	}
-	a := &Account{b: b, login: login, boxes: map[string]*Mailbox{}, byID: map[uuid.UUID]*Message{}, delim: '/',
+	a = &Account{b: b, login: login, loaded: make(chan struct{}), boxes: map[string]*Mailbox{}, byID: map[uuid.UUID]*Message{}, delim: '/',
 		refs: map[string]int{}, orphans: map[string]int{}, opWake: make(chan struct{}, 1),
 		emails: map[string][]*Message{}, log: newChangeLog()}
 	a.log.exists = a.exists
+	if b.accounts == nil {
+		b.accounts = map[string]*Account{}
+	}
+	b.accounts[login] = a
+	b.syncMu.Unlock()
+	a.load()
+	return a
+}
+
+// load restores the account's saved state, then closes a.loaded.
+func (a *Account) load() {
+	defer close(a.loaded)
+	b, login := a.b, a.login
 	if b.Store != nil {
 		// The provider the state belongs to: state saved for another is
 		// dropped.
@@ -209,6 +230,7 @@ func (b *Engine) account(login string) *Account {
 				provider = u.String()
 			}
 		}
+		start := time.Now()
 		a.loadSince()
 		saved, err := b.Store.load(login, provider)
 		if err != nil {
@@ -216,13 +238,54 @@ func (b *Engine) account(login string) *Account {
 		}
 		if saved != nil {
 			a.restore(saved)
+			// The first request for the account after a start waits for
+			// this, and every other account's first request with it.
+			b.Log.Info("account state loaded", "user", login, "messages", len(a.byID), "took", time.Since(start).Round(time.Millisecond))
 		}
 	}
-	if b.accounts == nil {
-		b.accounts = map[string]*Account{}
+}
+
+// isLoaded reports whether the account's saved state is restored.
+func (a *Account) isLoaded() bool {
+	select {
+	case <-a.loaded:
+		return true
+	default:
+		return false
 	}
-	b.accounts[login] = a
-	return a
+}
+
+// Preload loads, in the background, the saved state of every account
+// that has some and that a route still covers, so a client's first login
+// after a start does not wait for it. An account whose folder is named by
+// a hash is loaded at its first login instead.
+func (b *Engine) Preload() {
+	if b.Store == nil || b.Route == nil {
+		return
+	}
+	entries, err := os.ReadDir(filepath.Join(b.Store.Dir, "accounts"))
+	if err != nil {
+		return
+	}
+	b.preloadWG.Go(func() {
+		for _, e := range entries {
+			b.syncMu.Lock()
+			closing := b.closing
+			b.syncMu.Unlock()
+			if closing {
+				return
+			}
+			name := e.Name()
+			// A hash names the folder of a login that is not safe as a
+			// name: the hash is not that login.
+			if !e.IsDir() || hashName.MatchString(name) || !safeName.MatchString(name) || accountDir(b.Store.Dir, name) != filepath.Join(b.Store.Dir, "accounts", name) {
+				continue
+			}
+			if _, ok := b.Route(name); ok {
+				b.account(name)
+			}
+		}
+	})
 }
 
 // restore takes over saved state.
@@ -297,7 +360,7 @@ func HasAttr(attrs []imap.MailboxAttr, a imap.MailboxAttr) bool {
 func (a *Account) checkPassword(password string, u Upstream) bool {
 	a.credMu.Lock()
 	defer a.credMu.Unlock()
-	return a.password != "" && a.upstream == u &&
+	return a.password != "" && a.upstream.same(u) &&
 		subtle.ConstantTimeCompare([]byte(a.password), []byte(password)) == 1
 }
 
@@ -306,8 +369,8 @@ func (a *Account) checkPassword(password string, u Upstream) bool {
 func (a *Account) setCredentials(password string, u Upstream) {
 	a.credMu.Lock()
 	defer a.credMu.Unlock()
-	if a.password != password || a.upstream != u {
-		if a.upstream != u {
+	if a.password != password || !a.upstream.same(u) {
+		if !a.upstream.same(u) {
 			if a.prov != nil {
 				a.prov.Close()
 			}
@@ -356,7 +419,7 @@ var ErrNoCredentials = errors.New("no credentials for the account")
 func (a *Account) providerFor(u Upstream) provider {
 	a.credMu.Lock()
 	defer a.credMu.Unlock()
-	if a.prov != nil && a.upstream == u {
+	if a.prov != nil && a.upstream.same(u) {
 		return a.prov
 	}
 	if a.prov != nil {
@@ -376,7 +439,7 @@ func (b *Engine) newProvider(a *Account, u Upstream) provider {
 	password := func() string {
 		a.credMu.Lock()
 		defer a.credMu.Unlock()
-		if a.upstream != u {
+		if !a.upstream.same(u) {
 			return ""
 		}
 		return a.password
@@ -387,7 +450,12 @@ func (b *Engine) newProvider(a *Account, u Upstream) provider {
 	if u.ActiveSync != "" {
 		return newEASProvider(a, u, password)
 	}
-	return newIMAPProvider(a.login, u, b.id(), b.syncSection, password)
+	p := newIMAPProvider(a.login, u, b.id(), b.syncSection, password, b.Log)
+	for _, s := range p.srcs {
+		s.host = b.imapHost(u.Addr, s.addr)
+		s.host.add(s)
+	}
+	return p
 }
 
 // conn returns a provider connection for one request. hint names the
@@ -820,7 +888,8 @@ func (a *Account) keyFor(f freshMessage) string {
 // parseHeader parses a block of header fields, unfolding continuation
 // lines.
 func parseHeader(hdr []byte) textproto.MIMEHeader {
-	h, _ := textproto.NewReader(bufio.NewReader(bytes.NewReader(append(hdr, "\r\n"...)))).ReadMIMEHeader()
+	// A copy: hdr may share its array, and append would write into it.
+	h, _ := textproto.NewReader(bufio.NewReader(bytes.NewReader(append(hdr[:len(hdr):len(hdr)], "\r\n"...)))).ReadMIMEHeader()
 	return h
 }
 
@@ -944,8 +1013,13 @@ func (b *Engine) syncCtx() context.Context {
 // stopSync ends every engine and drops every password.
 func (b *Engine) stopSync() {
 	b.syncMu.Lock()
-	cancel, accounts := b.syncCancel, b.accounts
+	cancel, accounts := b.syncCancel, slices.Collect(maps.Values(b.accounts))
 	b.syncMu.Unlock()
+	// An account may still be loading for a login: Close returns only
+	// once the Store is no longer in use.
+	for _, a := range accounts {
+		<-a.loaded
+	}
 	if cancel != nil {
 		cancel()
 	}

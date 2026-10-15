@@ -197,7 +197,7 @@ imap: {listen: [":993", "127.0.0.1:143"]}
 smtp: {listen: "wg0:465"}
 accounts:
   - match: "@a.example"
-    imap: {upstream: "imap.a.example:993", source: wg0}
+    imap: {upstream: "imap.a.example:993", source: [wg0, eth1]}
     smtp: {upstream: "smtp.a.example:465"}
 `)
 	if err != nil {
@@ -209,10 +209,10 @@ accounts:
 	if want := (Addrs{"wg0:465"}); !slices.Equal(c.SMTP.Listen, want) {
 		t.Errorf("smtp.listen %q, want %q", c.SMTP.Listen, want)
 	}
-	if u, _, _ := c.Route("imap", "x@a.example"); u.Source != "wg0" {
-		t.Errorf("imap source %q, want wg0", u.Source)
+	if u, _, _ := c.Route("imap", "x@a.example"); !slices.Equal(u.Source, Addrs{"wg0", "eth1"}) {
+		t.Errorf("imap source %q, want wg0 and eth1", u.Source)
 	}
-	if u, _, _ := c.Route("smtp", "x@a.example"); u.Source != "tailscale0" {
+	if u, _, _ := c.Route("smtp", "x@a.example"); !slices.Equal(u.Source, Addrs{"tailscale0"}) {
 		t.Errorf("smtp source %q, want the default tailscale0", u.Source)
 	}
 }

@@ -130,11 +130,12 @@ func (p *easProvider) ctx() (context.Context, context.CancelFunc) {
 
 func (p *easProvider) newClient(password string) *eas.Client {
 	tr := &http.Transport{
-		DialContext:         netbind.Dialer(p.u.Source, p.timeout(), dialControl(p.timeout())).DialContext,
+		DialContext:         netbind.NewSpread(p.u.Sources, p.timeout(), dialControl(p.timeout(), true)).DialContext,
 		ForceAttemptHTTP2:   true,
 		TLSClientConfig:     p.u.TLSConfig,
 		TLSHandshakeTimeout: 10 * time.Second,
 		IdleConnTimeout:     90 * time.Second,
+		MaxConnsPerHost:     p.u.MaxConns,
 	}
 	if tr.TLSClientConfig == nil {
 		tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
@@ -147,7 +148,7 @@ func (p *easProvider) newClient(password string) *eas.Client {
 	id, key := p.deviceID, p.policyKey
 	p.mu.Unlock()
 	c := &eas.Client{URL: p.u.ActiveSync, User: p.a.login, Password: password, DeviceID: id, DeviceType: "mailcached",
-		UserAgent: ua, HTTP: &http.Client{Transport: tr}, PolicyKeySaved: p.savePolicyKey}
+		UserAgent: ua, HTTP: &http.Client{Transport: tr}, PolicyKeySaved: p.savePolicyKey, MaxConcurrent: p.u.MaxConns}
 	c.SetPolicyKey(key)
 	return c
 }
@@ -232,6 +233,9 @@ func (p *easProvider) do(ctx context.Context, cmd string, doc *wbxml.Node) (*wbx
 func (p *easProvider) Conn(priority, string) (conn, error) { return &easConn{p: p}, nil }
 
 func (p *easProvider) Close() {}
+
+// Capacity leaves out the Ping that waits for changes.
+func (p *easProvider) Capacity() int { return max(0, p.u.MaxConns-1) }
 
 // --- The model -------------------------------------------------------------
 

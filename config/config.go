@@ -116,8 +116,14 @@ type Config struct {
 	ListenAddresses []string `yaml:"listen_addresses"`
 	// UpstreamSource is where connections to providers leave from, for
 	// an upstream without its own source: an interface name or an IP
-	// address. Empty: wherever routing says.
-	UpstreamSource string `yaml:"upstream_source"`
+	// address, or a list of them, which connections take in turn. Empty:
+	// wherever routing says.
+	UpstreamSource Addrs `yaml:"upstream_source"`
+	// UpstreamMaxConnections caps the connections (IMAP) or requests at
+	// a time (JMAP, ActiveSync) each account opens to its provider, for
+	// an upstream without its own max_connections. It counts the one
+	// that waits for new mail. Default 0: no cap but the provider's.
+	UpstreamMaxConnections int `yaml:"upstream_max_connections"`
 
 	IMAP Service `yaml:"imap"`
 	SMTP Service `yaml:"smtp"`
@@ -212,9 +218,15 @@ type Upstream struct {
 	// URL says it.
 	UpstreamTLS string `yaml:"upstream_tls"`
 	// Source is where connections to this server leave from: an
-	// interface name (wg0, eth1) or a local IP address. Default:
+	// interface name (wg0, eth1) or a local IP address, or a list of
+	// them, which connections take in turn. A server that caps the
+	// connections from one address allows more over several. Default:
 	// upstream_source.
-	Source string `yaml:"source"`
+	Source Addrs `yaml:"source"`
+	// MaxConnections caps the connections to this server. Default:
+	// upstream_max_connections. Not for smtp, which opens one per
+	// message.
+	MaxConnections int `yaml:"max_connections"`
 	// Auth is how a JMAP provider gets the client's password: basic
 	// (default), or bearer for a provider that wants an API token
 	// (Fastmail), which clients then give as their password.
@@ -393,8 +405,11 @@ func (c *Config) applyDefaults() {
 			}
 		}
 		for _, u := range []*Upstream{&a.IMAP, &a.SMTP, &a.JMAP, &a.ActiveSync} {
-			if u.Source == "" {
+			if len(u.Source) == 0 {
 				u.Source = c.UpstreamSource
+			}
+			if u.MaxConnections == 0 {
+				u.MaxConnections = c.UpstreamMaxConnections
 			}
 		}
 		if a.JMAP.Upstream != "" && a.JMAP.Auth == "" {
@@ -450,7 +465,12 @@ func (c *Config) validate() error {
 			return fmt.Errorf("config: listen_addresses: %q: want an IP address, a host name or an interface name, without a port", h)
 		}
 	}
-	if err := checkSource("upstream_source", c.UpstreamSource); err != nil {
+	for _, s := range c.UpstreamSource {
+		if err := checkSource("upstream_source", s); err != nil {
+			return err
+		}
+	}
+	if err := checkMaxConns("upstream_max_connections", c.UpstreamMaxConnections); err != nil {
 		return err
 	}
 	if len(c.IMAP.Listen) == 0 && len(c.SMTP.Listen) == 0 && len(c.JMAP.Listen) == 0 && len(c.ActiveSync.Listen) == 0 {
@@ -510,7 +530,12 @@ func (c *Config) validate() error {
 			svc string
 			*Upstream
 		}{{"imap", &a.IMAP}, {"smtp", &a.SMTP}, {"jmap", &a.JMAP}, {"activesync", &a.ActiveSync}} {
-			if err := checkSource(name+"."+u.svc+".source", u.Source); err != nil {
+			for _, s := range u.Source {
+				if err := checkSource(name+"."+u.svc+".source", s); err != nil {
+					return err
+				}
+			}
+			if err := checkMaxConns(name+"."+u.svc+".max_connections", u.MaxConnections); err != nil {
 				return err
 			}
 		}
@@ -585,6 +610,15 @@ func (c *Config) checkActiveSync(key string, u Upstream) error {
 	}
 	if u.Auth != "" {
 		return fmt.Errorf("config: %s.auth is for jmap only", key)
+	}
+	return nil
+}
+
+// checkMaxConns validates a connection cap: 0 for none, or room for the
+// connection that waits for new mail and one for requests.
+func checkMaxConns(key string, n int) error {
+	if n < 0 || n == 1 {
+		return fmt.Errorf("config: %s %d: want 0 (no cap) or 2 or more", key, n)
 	}
 	return nil
 }

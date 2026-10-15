@@ -309,12 +309,13 @@ func (d *Detector) detect(address, domain string) (Result, error) {
 
 // pick returns the first usable candidate.
 func (d *Detector) pick(ctx context.Context, service string, cs []candidate) Found {
-	tried := map[config.Upstream]bool{}
+	tried := map[[3]string]bool{}
 	for _, c := range cs {
-		if tried[c.u] {
+		key := [3]string{c.u.Upstream, c.u.UpstreamTLS, c.u.Auth}
+		if tried[key] {
 			continue
 		}
-		tried[c.u] = true
+		tried[key] = true
 		if d.Usable(ctx, service, c.u) {
 			return Found{Upstream: c.u, From: c.from}
 		}

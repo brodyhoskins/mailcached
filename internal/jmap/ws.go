@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -43,10 +44,16 @@ func (c *Client) WebSocketPush(ctx context.Context, types []string, f func(State
 	h := http.Header{}
 	req := &http.Request{Header: h}
 	c.authorize(req)
+	if err := c.backoff.Wait(ctx); err != nil {
+		return fmt.Errorf("jmap: %w", err)
+	}
 	ws, resp, err := websocket.Dial(ctx, wc.URL, &websocket.DialOptions{
 		HTTPClient: c.httpClient(), HTTPHeader: h, Subprotocols: []string{"jmap"},
 		CompressionMode: websocket.CompressionContextTakeover,
 	})
+	if resp != nil {
+		c.backoff.Note(resp.StatusCode, resp.Header.Get("Retry-After"))
+	}
 	if err != nil {
 		if resp != nil && resp.StatusCode != http.StatusSwitchingProtocols {
 			return &StatusError{resp.StatusCode, err.Error()}

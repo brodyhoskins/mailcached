@@ -1,6 +1,7 @@
 package imapproxy
 
 import (
+	"context"
 	"errors"
 	"io"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapserver"
 
 	"github.com/brodyhoskins/mailcached/engine"
+	"github.com/brodyhoskins/mailcached/internal/load"
 )
 
 // Session is one client connection. It reads the engine's copy of the
@@ -42,6 +44,33 @@ var (
 	errNoMailbox   = &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeNonExistent, Text: "No such mailbox"}
 )
 
+// busy waits for room in the process for a command, and returns the call
+// that gives it back. IDLE and the commands that only read the session
+// hold none.
+func busy() func() {
+	_ = load.Default.Enter(context.Background())
+	return load.Default.Leave
+}
+
+// sessionsOf counts the sessions logged in to a.
+func (b *Server) sessionsOf(a *engine.Account) int {
+	b.mu.Lock()
+	ss := make([]*Session, 0, len(b.conns))
+	for s := range b.conns {
+		ss = append(ss, s)
+	}
+	b.mu.Unlock()
+	n := 0
+	for _, s := range ss {
+		s.mu.Lock()
+		if s.acct == a {
+			n++
+		}
+		s.mu.Unlock()
+	}
+	return n
+}
+
 func (s *Session) Close() error {
 	s.b.mu.Lock()
 	delete(s.b.conns, s)
@@ -52,6 +81,7 @@ func (s *Session) Close() error {
 
 // Login checks the credentials (engine.Account.Login).
 func (s *Session) Login(username, password string) error {
+	defer busy()()
 	if s.acct != nil {
 		return &imap.Error{Type: imap.StatusResponseTypeBad, Text: "Already logged in"}
 	}
@@ -70,6 +100,12 @@ func (s *Session) Login(username, password string) error {
 		s.b.Log.Error("imap: upstream login failed", "user", username, "err", err)
 		return passError(err)
 	}
+	// Under pressure, a user with a connection already gets no more: the
+	// client is told to use fewer (RFC 5530), as providers tell the proxy.
+	if load.Default.Pressed() && s.b.sessionsOf(a) > 0 {
+		s.b.Log.Info("imap: login refused under load", "user", username, "remote", remote)
+		return &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeLimit, Text: "Too many connections, try again later"}
+	}
 	s.mu.Lock()
 	s.user, s.acct = username, a
 	s.mu.Unlock()
@@ -87,6 +123,7 @@ func (s *Session) mailboxFor(name string) (*engine.Mailbox, error) {
 }
 
 func (s *Session) Select(name string, options *imap.SelectOptions) (*imap.SelectData, error) {
+	defer busy()()
 	s.closeMailbox()
 	m, err := s.mailboxFor(name)
 	if err != nil {
@@ -150,22 +187,27 @@ func (s *Session) current() (*engine.Account, *engine.Mailbox) {
 // --- Folders: done at the provider, then the list is read again ----------
 
 func (s *Session) Create(name string, options *imap.CreateOptions) error {
+	defer busy()()
 	return passError(s.acct.CreateFolder(name, options))
 }
 
 func (s *Session) Delete(name string) error {
+	defer busy()()
 	return passError(s.acct.DeleteFolder(name))
 }
 
 func (s *Session) Rename(name, newName string, options *imap.RenameOptions) error {
+	defer busy()()
 	return passError(s.acct.RenameFolder(name, newName, options))
 }
 
 func (s *Session) Subscribe(name string) error {
+	defer busy()()
 	return passError(s.acct.Subscribe(name, true))
 }
 
 func (s *Session) Unsubscribe(name string) error {
+	defer busy()()
 	return passError(s.acct.Subscribe(name, false))
 }
 
@@ -223,6 +265,7 @@ func hasSpecialUse(attrs []imap.MailboxAttr) bool {
 // Clients send it for every folder, often, so it does not ask the
 // provider, except for a folder never synced.
 func (s *Session) Status(name string, options *imap.StatusOptions) (*imap.StatusData, error) {
+	defer busy()()
 	a := s.acct
 	a.Lock()
 	m := a.Mailbox(name)
@@ -288,6 +331,7 @@ func (s *Session) Namespace() (*imap.NamespaceData, error) {
 
 // Append stores a message (engine.Account.Append).
 func (s *Session) Append(name string, r imap.LiteralReader, options *imap.AppendOptions) (*imap.AppendData, error) {
+	defer busy()()
 	if r.Size() > s.b.MaxMessageBytes {
 		return nil, &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeTooBig, Text: "Message too big"}
 	}
