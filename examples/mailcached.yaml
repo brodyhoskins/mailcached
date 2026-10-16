@@ -106,6 +106,25 @@ jmap:
 #   tls: implicit                    # implicit | none (HTTP has no STARTTLS)
 #   max_message_bytes: 52428800      # largest message a device sends
 
+# Sender authentication. Providers check new mail (DMARC, DKIM, SPF) and
+# write their verdict in its header, but some deliver failing mail
+# anyway. mailcached reads that verdict before clients see new mail, and
+# acts on it. It learns which header fields are the provider's from the
+# mail in INBOX, as a sender can write such fields too. Mail you move out
+# of Junk stays. Only mail that arrives after an account's first sync is
+# checked.
+#   standard  what the standards ask. A DMARC failure goes as the sender's
+#             domain says: p=reject is deleted, p=quarantine goes to Junk,
+#             p=none stays. Without a DMARC pass, an SPF fail is deleted
+#             and a softfail goes to Junk.
+#   strict    every SPF failure is deleted, softfail too, even when DMARC
+#             passes, and every DMARC failure goes at least to Junk.
+#   off       no checks: mail is shown as the provider delivers it. Use
+#             it for a provider that writes no verdict. With standard or
+#             strict, such a provider's new mail waits in Junk, as no
+#             stamp can be learned.
+# authentication: standard
+
 # Which provider each login goes to. match is a full address or a domain
 # (@example.com). An address match wins over a domain match. mailcached
 # uses COMPRESS=DEFLATE with any IMAP server that offers it.

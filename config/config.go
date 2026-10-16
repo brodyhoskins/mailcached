@@ -159,6 +159,8 @@ type Config struct {
 	// within cache_max_age that the cache lost. Default true. It needs
 	// cache_dir.
 	Backfill *bool `yaml:"backfill"`
+	// Authentication is standard (default), strict or off.
+	Authentication string `yaml:"authentication"`
 }
 
 // TLSConfig is the certificate clients see. It is reloaded when the files
@@ -256,22 +258,7 @@ func (a *Addrs) UnmarshalYAML(n *yaml.Node) error {
 // "smtp", "jmap" or "activesync"). ok is false when no account matches or the matching account
 // has no server for the service. match is "" when no account matches.
 func (c *Config) Route(service, login string) (u Upstream, match string, ok bool) {
-	login = strings.ToLower(strings.TrimSpace(login))
-	_, domain, found := strings.Cut(login, "@")
-	if !found {
-		return Upstream{}, "", false
-	}
-	var acct *Account
-	for i := range c.Accounts {
-		a := &c.Accounts[i]
-		if a.Match == login {
-			acct = a
-			break
-		}
-		if acct == nil && a.Match == "@"+domain {
-			acct = a
-		}
-	}
+	acct := c.account(login)
 	if acct == nil {
 		return Upstream{}, "", false
 	}
@@ -286,6 +273,26 @@ func (c *Config) Route(service, login string) (u Upstream, match string, ok bool
 		u = acct.IMAP
 	}
 	return u, acct.Match, u.Upstream != ""
+}
+
+// account returns the account a login matches, or nil.
+func (c *Config) account(login string) *Account {
+	login = strings.ToLower(strings.TrimSpace(login))
+	_, domain, found := strings.Cut(login, "@")
+	if !found {
+		return nil
+	}
+	var acct *Account
+	for i := range c.Accounts {
+		a := &c.Accounts[i]
+		if a.Match == login {
+			return a
+		}
+		if acct == nil && a.Match == "@"+domain {
+			acct = a
+		}
+	}
+	return acct
 }
 
 // Load reads path (empty for none) and applies defaults.
@@ -379,6 +386,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Log == "" {
 		c.Log = "stderr"
+	}
+	if c.Authentication == "" {
+		c.Authentication = "standard"
 	}
 	host, _ := os.Hostname()
 	for _, s := range []*Service{&c.IMAP, &c.SMTP, &c.JMAP, &c.ActiveSync} {
@@ -511,6 +521,11 @@ func (c *Config) validate() error {
 
 	if len(c.Accounts) == 0 && !*c.Autodetect {
 		return fmt.Errorf("config: accounts is empty and autodetect is off; list each address or domain the proxy serves, with its provider's servers")
+	}
+	switch c.Authentication {
+	case "standard", "strict", "off":
+	default:
+		return fmt.Errorf("config: authentication %q: want standard, strict or off", c.Authentication)
 	}
 	seen := map[string]bool{}
 	for i, a := range c.Accounts {

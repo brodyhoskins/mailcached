@@ -478,10 +478,18 @@ func (a *Account) runMove(o *op, group []*op) error {
 		if err != nil {
 			return err
 		}
+		hdrs, err := a.movingBack(c, box, dest, pUIDs(msgs))
+		if err != nil {
+			c.Release(err)
+			return err
+		}
 		to, err := c.Move(box, pUIDs(msgs), dest)
 		c.Release(err)
 		if err != nil {
 			return err
+		}
+		for _, e := range hdrs {
+			a.rescueMove(e.Header, box)
 		}
 		a.mu.Lock()
 		tx := a.begin()
@@ -574,6 +582,11 @@ func (a *Account) runCopy(o *op, group []*op) error {
 		if err != nil {
 			return err
 		}
+		hdrs, err := a.movingBack(c, box, dest, pUIDs(srcs))
+		if err != nil {
+			c.Release(err)
+			return err
+		}
 		var to map[imap.UID]imap.UID
 		if move {
 			to, err = c.Move(box, pUIDs(srcs), dest)
@@ -583,6 +596,9 @@ func (a *Account) runCopy(o *op, group []*op) error {
 		c.Release(err)
 		if err != nil {
 			return err
+		}
+		for _, e := range hdrs {
+			a.rescueMove(e.Header, box)
 		}
 		a.mu.Lock()
 		tx := a.begin()

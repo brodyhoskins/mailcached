@@ -42,4 +42,25 @@ const (
 	// tried again with every sweep and on Engine.Recheck. For an older
 	// message, ReadHold is ReadRetry.
 	ReadHold
+	// ReadJunk, ReadTrash and ReadDelete move new mail away; for older
+	// mail they act as ReadRetry.
+	ReadJunk
+	ReadTrash
+	ReadDelete
+	// ReadDefer is ReadJunk, released once the stamp is known.
+	ReadDefer
 )
+
+func (s ReadStatus) moveAway() (how moveAway, ok bool) {
+	switch s {
+	case ReadJunk:
+		return moveAway{act: AuthJunk, strict: true}, true
+	case ReadTrash:
+		return moveAway{act: AuthTrash, strict: true}, true
+	case ReadDelete:
+		return moveAway{act: AuthDelete, strict: true}, true
+	case ReadDefer:
+		return moveAway{act: AuthJunk, deferred: true, strict: true}, true
+	}
+	return moveAway{}, false
+}

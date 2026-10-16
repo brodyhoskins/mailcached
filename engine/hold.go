@@ -82,7 +82,10 @@ func (a *Account) startSince() {
 // mustCheck reports whether a message the sync finds must be read before
 // clients see it (a.mu held).
 func (a *Account) mustCheck(msg *Message) bool {
-	return a.b.Transform != nil && !msg.direct && !a.since.IsZero() && !msg.date.Before(a.since)
+	if a.since.IsZero() || msg.date.Before(a.since) {
+		return false
+	}
+	return a.b.Transform != nil && !msg.direct || a.authChecks(msg.pBox) || a.authCopies(msg.pBox)
 }
 
 // holdKey is where a held message's provider copy is kept in memory, so
@@ -116,15 +119,118 @@ func (a *Account) checkHeld(msgs []*Message) {
 	}()
 
 	// One Read a key: copies of a message are held or shown together.
+	// A copy in a checked folder decides, then one in authCopies, else the first.
+	type heldKey struct {
+		check, copies, direct, inbox bool
+		box                          string
+		date                         time.Time
+		roles                        []AuthAction // actions that target its own folder
+	}
+	if a.b.Authentication != "" {
+		a.seedLearning()
+	}
+	a.mu.Lock()
+	info := map[string]heldKey{}
+	for key, l := range keys {
+		msg := l[0]
+		if i := slices.IndexFunc(l, func(m *Message) bool { return a.authChecks(m.pBox) }); i >= 0 {
+			msg = l[i]
+		} else if i := slices.IndexFunc(l, func(m *Message) bool { return a.authCopies(m.pBox) }); i >= 0 {
+			msg = l[i]
+		}
+		var roles []AuthAction
+		for _, act := range []AuthAction{AuthTrash, AuthJunk} {
+			if a.hasRole(msg.pBox, act.attr()) {
+				roles = append(roles, act)
+			}
+		}
+		info[key] = heldKey{check: a.authChecks(msg.pBox), copies: a.authCopies(msg.pBox), direct: msg.direct,
+			inbox: msg.pBox == "INBOX", box: msg.pBox, date: msg.date, roles: roles}
+	}
+	a.mu.Unlock()
+
 	results := map[string]ReadStatus{}
+	entries := map[string]*HeaderEntry{} // direct messages, headers only
+	whole := map[string]bool{}           // direct messages fetched whole
+	away := map[string]moveAway{}
+	idents := map[string]authRef{}
 	read := func(key string, raw []byte) {
 		if _, done := results[key]; done {
 			return
 		}
+		in := info[key]
 		ctx, cancel := context.WithTimeout(context.Background(), a.b.Timeout)
-		out, st := a.b.Transform.Read(ctx, raw)
-		cancel()
+		defer cancel()
+		var r AuthResult
+		mine := AuthNone
+		hold := false // All Mail/Flagged copy not yet allowed
+		if in.copies {
+			// All Mail/Flagged only: held until allowed, never moved.
+			hdr := headerOf(raw)
+			if a.rescued(hdr) {
+				r = rescuedResult
+			} else {
+				r = a.b.verdict(ctx, a.stamp(), hdr)
+				hold = r.Learning || a.b.Authentication.action(r) != AuthNone
+			}
+			r.New = true
+			ctx = WithAuthResult(ctx, r)
+		}
+		if in.check {
+			hdr := headerOf(raw)
+			idents[key] = refOf(hdr)
+			if in.inbox {
+				a.learn(in.date, hdr)
+			}
+			if a.rescue(hdr, in.box) || a.rescued(hdr) {
+				r = rescuedResult
+			} else {
+				r = a.b.verdict(ctx, a.stamp(), hdr)
+			}
+			r.New = true
+			ctx = WithAuthResult(ctx, r)
+			mine = a.b.Authentication.action(r)
+		}
+		out, st := raw, ReadFinal
+		if !in.direct {
+			out, st = a.b.Transform.Read(ctx, raw)
+		}
+		how, moved := st.moveAway()
+		if in.copies && moved {
+			st, moved = ReadHold, false
+		}
+		if mine.severity() > how.act.severity() {
+			how, moved, st = moveAway{act: mine}, true, mine.status()
+			a.b.Log.Info("sender authentication failed", "user", a.login, "from", r.From, "reason", r.Reason,
+				"dmarc", r.DMARC, "policy", r.DMARCPolicy, "spf", r.SPF, "action", mine)
+		}
+		if moved {
+			how.learning = r.Learning
+			if slices.Contains(in.roles, how.act) {
+				st = ReadRetry // in that folder already
+			} else {
+				away[key] = how
+			}
+		} else if in.check && r.Learning {
+			// Wait in Junk until the stamp is known.
+			st, away[key] = ReadDefer, moveAway{act: AuthJunk, deferred: true, learning: true}
+		} else if hold && (st == ReadFinal || st == ReadRetry) {
+			st = ReadHold
+		}
+		if how, ok := away[key]; ok && in.check && how.deferred && idents[key].id == "" {
+			// No identity: a release could not find it.
+			delete(away, key)
+			st = ReadHold
+		}
 		results[key] = st
+		if in.direct && !whole[key] {
+			if e := entries[key]; e != nil && st == ReadFinal {
+				if err := a.b.Store.putHeaders(a.login, map[string]*HeaderEntry{key: e}); err != nil {
+					a.b.Log.Warn("could not save header entries", "user", a.login, "err", err)
+				}
+			}
+			return
+		}
 		switch st {
 		case ReadFinal:
 			if err := a.b.Cache.Put(a.login, key, out, true); err != nil {
@@ -139,12 +245,52 @@ func (a *Account) checkHeld(msgs []*Message) {
 			_ = a.b.Cache.Put(a.login, holdKey(key), raw, false)
 		}
 	}
-	var fetch []*Message
+	var fetch, fetchHeaders []*Message
 	for key, l := range keys {
-		if raw := a.b.Cache.Get(a.login, holdKey(key)); raw != nil {
+		if info[key].direct {
+			fetchHeaders = append(fetchHeaders, l[0])
+		} else if raw := a.b.Cache.Get(a.login, holdKey(key)); raw != nil {
 			read(key, raw)
 		} else {
 			fetch = append(fetch, l[0])
+		}
+	}
+	for box, at := range a.locate(fetchHeaders) {
+		for chunk := range slices.Chunk(at.uids(), FetchBatch) {
+			c, err := a.conn(interactive, box)
+			if err != nil {
+				if !errors.Is(err, ErrNoCredentials) {
+					a.b.Log.Warn("could not read held messages", "user", a.login, "err", err)
+				}
+				return
+			}
+			if !cheapHeaders(c) {
+				// No header-only fetch: read whole and cache.
+				err = c.FetchFull(box, chunk, func(uid imap.UID, raw []byte) {
+					for _, msg := range at[uid] {
+						whole[msg.key] = true
+						read(msg.key, raw)
+					}
+				})
+				c.Release(err)
+				if err != nil {
+					a.b.Log.Warn("could not read held messages", "user", a.login, "mailbox", box, "err", err)
+					return
+				}
+				continue
+			}
+			got, err := c.FetchHeaders(box, chunk)
+			c.Release(err)
+			if err != nil {
+				a.b.Log.Warn("could not read held messages", "user", a.login, "mailbox", box, "err", err)
+				return
+			}
+			for uid, e := range got {
+				for _, msg := range at[uid] {
+					entries[msg.key] = e
+					read(msg.key, e.Header)
+				}
+			}
 		}
 	}
 	for box, at := range a.locate(fetch) {
@@ -169,12 +315,20 @@ func (a *Account) checkHeld(msgs []*Message) {
 		}
 	}
 
+	groups := map[moveAway][]*Message{}
+	for key, how := range away {
+		groups[how] = append(groups[how], keys[key]...)
+	}
+	for how, msgs := range groups {
+		a.discard(how, msgs, idents)
+	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	tx := a.begin()
-	var shown []*Message
+	var shown, ahead []*Message
 	for key, st := range results {
-		if st == ReadHold {
+		if _, gone := away[key]; gone || st == ReadHold {
 			continue
 		}
 		for _, msg := range keys[key] {
@@ -186,11 +340,18 @@ func (a *Account) checkHeld(msgs []*Message) {
 			msg.held = false
 			a.show(m, msg, tx)
 			shown = append(shown, msg)
+			// Prefetch unless large (piece.go).
+			if e := entries[key]; e != nil && e.Size <= PieceWhole {
+				ahead = append(ahead, msg)
+			}
 		}
 		_ = a.b.Cache.Delete(a.login, holdKey(key))
 	}
 	if len(shown) > 0 {
 		a.backfillStale.Store(true)
+	}
+	if len(ahead) > 0 {
+		go a.prefetch(ahead)
 	}
 	if err := tx.commit(); err != nil {
 		a.b.Log.Warn("could not save mailbox state", "user", a.login, "err", err)
@@ -200,6 +361,15 @@ func (a *Account) checkHeld(msgs []*Message) {
 // retryHeld reads every held message of the account again, in the
 // background, and logs those still held. One retry runs at a time.
 func (a *Account) retryHeld(logHeld bool) {
+	if a.tending.CompareAndSwap(false, true) {
+		go func() {
+			defer a.tending.Store(false)
+			if a.b.Authentication != "" {
+				a.seedLearning()
+				a.releaseDeferred()
+			}
+		}()
+	}
 	a.mu.Lock()
 	var held []*Message
 	count := map[string]int{}

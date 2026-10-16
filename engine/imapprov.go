@@ -1143,7 +1143,7 @@ func (pc *imapConn) Expunge(name string, uids []imap.UID) error {
 	if err != nil {
 		return err
 	}
-	if c.Caps().Has(imap.CapUIDPlus) || c.Caps().Has(imap.CapIMAP4rev2) {
+	if pc.exactExpunge() {
 		_, err = c.UIDExpunge(set).Collect()
 	} else {
 		// Expunges every message with \Deleted; the resync finds any
@@ -1151,6 +1151,12 @@ func (pc *imapConn) Expunge(name string, uids []imap.UID) error {
 		_, err = c.Expunge().Collect()
 	}
 	return err
+}
+
+func (pc *imapConn) cheapHeaders() bool { return true }
+
+func (pc *imapConn) exactExpunge() bool {
+	return pc.c.Caps().Has(imap.CapUIDPlus) || pc.c.Caps().Has(imap.CapIMAP4rev2)
 }
 
 func (pc *imapConn) Append(name string, data []byte, opts *imap.AppendOptions) (imap.UID, uint32, error) {

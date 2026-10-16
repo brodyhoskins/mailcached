@@ -126,6 +126,9 @@ func (a *Account) Login(password string) error {
 			a.b.Log.Warn("could not read folders", "user", a.login, "err", err)
 		}
 	}
+	if a.b.Authorize != nil {
+		return a.b.Authorize(a)
+	}
 	return nil
 }
 
@@ -254,6 +257,7 @@ func (a *Account) renameLocal(name, newName string) {
 		tx.renameMailbox(old, renamed)
 		a.log.touch(KindMailbox, m.jmapID, false)
 	}
+	a.renameAuth(name, newName)
 	if err := tx.commit(); err != nil {
 		a.b.Log.Warn("could not save mailbox state", "user", a.login, "err", err)
 	}

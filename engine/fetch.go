@@ -299,7 +299,7 @@ func (a *Account) fetchFrom(msgs []*Message, out map[*Message][]byte, cl *claime
 					c.Release(nil)
 					continue
 				}
-				batch, err := a.b.fetchFull(c, box, a.login, slices.Sorted(slices.Values(chunk)), at, out)
+				batch, err := a.b.fetchFull(c, box, a.login, slices.Sorted(slices.Values(chunk)), at, out, a.withVerdict)
 				c.Release(err)
 				if err != nil {
 					return err
@@ -419,8 +419,9 @@ func (a *Account) prefetch(msgs []*Message) {
 // Transform and caches them under the keys of their messages in at. A direct message
 // is cached exactly as the provider has it, so the cache and the provider
 // agree on every byte. Results also go to out, if not nil. It returns the
-// messages it got.
-func (b *Engine) fetchFull(c conn, box, account string, uids []imap.UID, at located, out map[*Message][]byte) ([]*Message, error) {
+// messages it got. withAuth, if set, adds the verdict to Read's context.
+func (b *Engine) fetchFull(c conn, box, account string, uids []imap.UID, at located, out map[*Message][]byte,
+	withAuth func(context.Context, []byte) context.Context) ([]*Message, error) {
 	var got []*Message
 	// The header entries of transformed messages, so client lists need not
 	// read them whole.
@@ -438,6 +439,9 @@ func (b *Engine) fetchFull(c conn, box, account string, uids []imap.UID, at loca
 		data, final := raw, true
 		if !msgs[0].direct {
 			ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
+			if withAuth != nil {
+				ctx = withAuth(ctx, raw)
+			}
 			var st ReadStatus
 			data, st = b.Transform.Read(ctx, raw)
 			cancel()

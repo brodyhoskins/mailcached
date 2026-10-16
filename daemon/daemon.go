@@ -56,6 +56,8 @@ type Program struct {
 type Hooks struct {
 	Transform engine.Transform // between the provider and clients
 	Filter    smtpproxy.Filter // SMTP: before submission to the provider
+	// Authorize, if set, runs after each login (engine.Engine.Authorize).
+	Authorize func(a *engine.Account) error
 	// Started, if not nil, is called once with the engine, after it is
 	// made and before the listeners serve: for a program that calls
 	// Engine.Recheck when what its Transform needs changes.
@@ -299,13 +301,15 @@ func Main(p Program, args []string, stdout, stderr io.Writer) int {
 			}
 			return engine.Upstream{Addr: u.Upstream, TLS: u.UpstreamTLS, Sources: source(u), MaxConns: maxConns(u), Timeout: bc.IMAP.Timeout}, ok
 		},
-		Timeout:   bc.IMAP.Timeout,
-		Transform: hooks.Transform,
-		Cache:     cache,
-		Backfill:  *bc.Backfill,
-		Name:      name,
-		Version:   p.Version,
-		Log:       log,
+		Authentication: authMode(bc.Authentication),
+		Timeout:        bc.IMAP.Timeout,
+		Transform:      hooks.Transform,
+		Authorize:      hooks.Authorize,
+		Cache:          cache,
+		Backfill:       *bc.Backfill,
+		Name:           name,
+		Version:        p.Version,
+		Log:            log,
 	}
 	defer eng.Close()
 	eng.Preload()
@@ -401,6 +405,7 @@ func Main(p Program, args []string, stdout, stderr io.Writer) int {
 			"activesync", a.ActiveSync.Upstream)
 	}
 	log.Info("autodetect for other logins", "enabled", *bc.Autodetect)
+	log.Info("sender authentication", "mode", bc.Authentication)
 	if addr := os.Getenv(env + "_PPROF"); addr != "" {
 		servePprof(env+"_PPROF", addr, log)
 	}
@@ -556,4 +561,11 @@ func (j providerSender) Send(ctx context.Context, login, _ string, env *smtpprox
 		return &smtp.SMTPError{Code: 554, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: err.Error()}
 	}
 	return err
+}
+
+func authMode(s string) engine.AuthMode {
+	if s == "off" {
+		return ""
+	}
+	return engine.AuthMode(s)
 }
