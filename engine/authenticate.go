@@ -497,9 +497,10 @@ func (a *Account) learn(date time.Time, hdr []byte) {
 	l := a.learning()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	before := l.learned()
+	before, trusted := l.learned(), l.trusted()
 	if l.observe(identity(hdr), date, hdr) {
-		a.logStamp(l, before, l.learned())
+		l.noteTrusted(trusted)
+		a.logStamp(before, l.learned())
 		a.saveLearning(l)
 	}
 }
@@ -560,7 +561,7 @@ func (a *Account) seedLearning() {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	before := l.learned()
+	before, trusted := l.learned(), l.trusted()
 	added := false
 	for msg, hdr := range headers {
 		if l.observe(identity(hdr), msg.date, hdr) {
@@ -568,16 +569,22 @@ func (a *Account) seedLearning() {
 		}
 	}
 	if added {
-		a.logStamp(l, before, l.learned())
+		l.noteTrusted(trusted)
+		a.logStamp(before, l.learned())
 		a.saveLearning(l)
 	}
 }
 
-// logStamp logs stamp changes and sets KnownSince (l.mu held).
-func (a *Account) logStamp(l *authLearn, before, after []string) {
-	if len(before) == 0 && len(after) > 0 && len(l.Confirmed) == 0 {
+// noteTrusted sets KnownSince if a name is trusted that was not in
+// before: mail deferred without it may pass now (l.mu held).
+func (l *authLearn) noteTrusted(before []string) {
+	if slices.ContainsFunc(l.trusted(), func(id string) bool { return !slices.Contains(before, id) }) {
 		l.KnownSince = time.Now()
 	}
+}
+
+// logStamp logs stamp changes.
+func (a *Account) logStamp(before, after []string) {
 	switch {
 	case slices.Equal(before, after):
 	case len(after) == 0:
@@ -647,7 +654,7 @@ func (a *Account) rescueIf(hdr []byte, keys []string, ok func(l *authLearn, key 
 		l.mu.Unlock()
 		return true
 	}
-	id := ref.id
+	id, trusted := ref.id, l.trusted()
 	m.Rescued, m.Defer = true, false
 	a.b.Log.Info("message moved back by the user", "user", a.login, "from", m.Folder)
 	if !m.Strict {
@@ -657,13 +664,11 @@ func (a *Account) rescueIf(hdr []byte, keys []string, ok func(l *authLearn, key 
 			}
 			l.Rescues[name] = append(l.Rescues[name], id)
 			if len(l.Rescues[name]) >= authConfirm && !slices.Contains(l.Confirmed, name) {
-				if len(l.Confirmed) == 0 && len(l.learned()) == 0 {
-					l.KnownSince = time.Now()
-				}
 				l.Confirmed = append(l.Confirmed, name)
 				a.b.Log.Info("provider stamp confirmed by messages moved back", "user", a.login, "stamp", name)
 			}
 		}
+		l.noteTrusted(trusted)
 	}
 	// Without l.mu, which a folder rename takes inside a Store transaction.
 	// Before the save: if it stops in between, the next rescue drops again.
@@ -822,6 +827,7 @@ func (a *Account) hasRole(box string, attr imap.MailboxAttr) bool {
 type moveAway struct {
 	act                        AuthAction
 	deferred, strict, learning bool
+	verdictAt                  time.Time // the record's At, if set
 }
 
 // discard moves or deletes held messages at the provider. Failures stay
@@ -904,10 +910,13 @@ func (a *Account) discardIn(how moveAway, box, dest, trash string, msgs []*Messa
 	// Saved as pending first, to survive a crash mid-move.
 	l := a.learning()
 	l.mu.Lock()
-	now := time.Now()
+	at := how.verdictAt
+	if at.IsZero() {
+		at = time.Now()
+	}
 	for _, msg := range byUID {
 		if ref := refs[msg.key]; ref.id != "" {
-			l.Moved[ref.key(box)] = &authMoved{Action: act, Folder: to, Origin: box, Copy: ref.copy, At: now,
+			l.Moved[ref.key(box)] = &authMoved{Action: act, Folder: to, Origin: box, Copy: ref.copy, At: at,
 				Defer: how.deferred, Strict: how.strict, Learning: how.learning, Pending: true}
 		}
 	}

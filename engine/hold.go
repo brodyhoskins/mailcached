@@ -149,6 +149,7 @@ func (a *Account) checkHeld(msgs []*Message) {
 	}
 	a.mu.Unlock()
 
+	start := time.Now()
 	results := map[string]ReadStatus{}
 	entries := map[string]*HeaderEntry{} // direct messages, headers only
 	whole := map[string]bool{}           // direct messages fetched whole
@@ -322,6 +323,10 @@ func (a *Account) checkHeld(msgs []*Message) {
 
 	groups := map[moveAway][]*Message{}
 	for key, how := range away {
+		if how.deferred {
+			// A stamp learned later in this batch must release it.
+			how.verdictAt = start
+		}
 		groups[how] = append(groups[how], keys[key]...)
 	}
 	for how, msgs := range groups {
