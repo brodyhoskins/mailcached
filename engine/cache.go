@@ -69,10 +69,10 @@ type Cache struct {
 	trimmed map[string]bool
 	statfs  func(dir string) (avail, total uint64, err error) // tests; nil for the system's
 
-	dbMu    sync.Mutex
-	dbs     map[string]*chunkDB // by account folder
-	closed  bool
-	touches sync.WaitGroup // the background writes of touch, which Close waits for
+	dbMu   sync.Mutex
+	dbs    map[string]*chunkDB // by account folder
+	closed bool
+	uses   sync.WaitGroup // of the chunk databases, which Close waits for
 
 	mu    sync.Mutex
 	size  int64
@@ -120,8 +120,12 @@ func (c *Cache) Has(account, key string) bool {
 	if ok || c.Dir == "" {
 		return ok
 	}
-	db, err := c.chunkDB(account)
-	return err == nil && db.has(key)
+	db, done, err := c.use(account)
+	if err != nil {
+		return false
+	}
+	defer done()
+	return db.has(key)
 }
 
 // Get returns a cached message, or nil. A read counts as use for Prune.
@@ -172,11 +176,12 @@ func (c *Cache) readDisk(account, key string) ([]byte, time.Time) {
 	if c.Dir == "" {
 		return nil, time.Time{}
 	}
-	db, err := c.chunkDB(account)
+	db, done, err := c.use(account)
 	if err != nil {
 		c.logWarn("cache: chunk database", err)
 		return nil, time.Time{}
 	}
+	defer done()
 	data, readAt, err := db.read(key)
 	if err != nil {
 		c.logWarn("cache: read", err)
@@ -200,16 +205,14 @@ func (c *Cache) touch(account, key string) {
 	if c.Dir == "" {
 		return
 	}
-	db, err := c.chunkDB(account)
+	db, done, err := c.use(account)
 	if err != nil {
 		return
 	}
-	c.dbMu.Lock()
-	defer c.dbMu.Unlock()
-	if c.closed {
-		return
-	}
-	c.touches.Go(func() { _ = db.touch(key, time.Now()) })
+	go func() {
+		defer done()
+		_ = db.touch(key, time.Now())
+	}()
 }
 
 // Prune deletes the messages on disk not read for maxAge, and returns how
@@ -218,7 +221,8 @@ func (c *Cache) Prune(maxAge time.Duration) (int, error) {
 	if c.Dir == "" || maxAge <= 0 {
 		return 0, nil
 	}
-	dbs, err := c.chunkDBs()
+	dbs, done, err := c.useAll()
+	defer done()
 	n := 0
 	for _, db := range dbs {
 		cutoff := time.Now().Add(-maxAge)
@@ -287,11 +291,13 @@ func (c *Cache) put(account, key string, data []byte, persist bool) error {
 	if !persist || c.Dir == "" {
 		return nil
 	}
-	db, err := c.chunkDB(account)
+	db, done, err := c.use(account)
 	if err != nil {
 		return err
 	}
-	if err := db.write(key, data, now); err != nil {
+	err = db.write(key, data, now)
+	done()
+	if err != nil {
 		return err
 	}
 	c.trimSoon()
@@ -305,12 +311,12 @@ func (c *Cache) Delete(account, key string) error {
 	if c.Dir == "" {
 		return nil
 	}
-	db, err := c.chunkDB(account)
+	db, done, err := c.use(account)
 	if err != nil {
 		return err
 	}
-	err = db.remove(key)
-	return err
+	defer done()
+	return db.remove(key)
 }
 
 // noteReads records reads of keys with note, except of those Trim
@@ -346,7 +352,7 @@ func (c *Cache) Close() error {
 	c.dbMu.Lock()
 	c.closed = true
 	c.dbMu.Unlock()
-	c.touches.Wait()
+	c.uses.Wait()
 	c.dbMu.Lock()
 	defer c.dbMu.Unlock()
 	var errs []error

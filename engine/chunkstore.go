@@ -492,6 +492,40 @@ func (d *chunkDB) vacuum() error {
 	return err
 }
 
+// use is chunkDB for one use, which Close waits for until done.
+func (c *Cache) use(account string) (*chunkDB, func(), error) {
+	if !c.begin() {
+		return nil, nil, errors.New("cache closed")
+	}
+	db, err := c.chunkDB(account)
+	if err != nil {
+		c.uses.Done()
+		return nil, nil, err
+	}
+	return db, c.uses.Done, nil
+}
+
+// useAll is chunkDBs for one use, which Close waits for until done.
+func (c *Cache) useAll() ([]*chunkDB, func(), error) {
+	if !c.begin() {
+		return nil, func() {}, errors.New("cache closed")
+	}
+	dbs, err := c.chunkDBs()
+	return dbs, c.uses.Done, err
+}
+
+// begin counts a use unless the cache is closed: Close sets closed under
+// dbMu before it waits, so no use starts after the wait.
+func (c *Cache) begin() bool {
+	c.dbMu.Lock()
+	defer c.dbMu.Unlock()
+	if c.closed {
+		return false
+	}
+	c.uses.Add(1)
+	return true
+}
+
 // chunkDBs opens the chunk database of every account that has one.
 func (c *Cache) chunkDBs() ([]*chunkDB, error) {
 	ents, err := os.ReadDir(filepath.Join(c.Dir, "accounts"))
