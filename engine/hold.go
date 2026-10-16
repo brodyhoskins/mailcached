@@ -191,6 +191,11 @@ func (a *Account) checkHeld(msgs []*Message) {
 			ctx = WithAuthResult(ctx, r)
 			mine = a.b.Authentication.action(r)
 		}
+		if !in.check && !in.copies && !in.direct {
+			// Junk, Trash and the like: the verdict is for the
+			// Transform to show, not to act on (New is false).
+			ctx = a.withVerdict(ctx, raw)
+		}
 		out, st := raw, ReadFinal
 		if !in.direct {
 			out, st = a.b.Transform.Read(ctx, raw)

@@ -138,7 +138,11 @@ func WithAuthResult(ctx context.Context, r AuthResult) context.Context {
 
 // AuthState is what the engine knows of an account's provider stamp.
 type AuthState struct {
-	Stamp       []string // trusted names; empty while learning
+	Stamp []string // trusted names; empty while learning
+	// Candidates are names on authShare of a full window that are not
+	// learned for want of senders: the provider stamps its verdicts, but
+	// its mail comes from too few domains to tell it from a forger's.
+	Candidates  []string
 	Examined    int
 	LastStamped time.Time
 }
@@ -148,7 +152,13 @@ func (a *Account) AuthState() AuthState {
 	l := a.learning()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return AuthState{Stamp: l.trusted(), Examined: l.Examined, LastStamped: l.LastStamped}
+	st := AuthState{Stamp: l.trusted(), Examined: l.Examined, LastStamped: l.LastStamped}
+	for _, id := range l.common() {
+		if !slices.Contains(st.Stamp, id) {
+			st.Candidates = append(st.Candidates, id)
+		}
+	}
+	return st
 }
 
 func (a *Account) withVerdict(ctx context.Context, raw []byte) context.Context {
@@ -420,6 +430,20 @@ func (l *authLearn) trusted() []string {
 }
 
 func (l *authLearn) learned() []string {
+	return l.onWindow(func(id string, senders int) bool {
+		return senders >= authSenders || slices.Contains(l.Learned, id)
+	})
+}
+
+// common returns the names on authShare of a full window, whatever their
+// senders.
+func (l *authLearn) common() []string {
+	return l.onWindow(func(string, int) bool { return true })
+}
+
+// onWindow returns the names on authShare of a full window for which ok
+// holds, given how many sender domains they came from.
+func (l *authLearn) onWindow(ok func(id string, senders int) bool) []string {
 	if len(l.Seen) < authWindow {
 		return nil
 	}
@@ -436,7 +460,7 @@ func (l *authLearn) learned() []string {
 	}
 	var out []string
 	for id, n := range count {
-		if float64(n) >= authShare*float64(len(l.Seen)) && (len(senders[id]) >= authSenders || slices.Contains(l.Learned, id)) {
+		if float64(n) >= authShare*float64(len(l.Seen)) && ok(id, len(senders[id])) {
 			out = append(out, id)
 		}
 	}
