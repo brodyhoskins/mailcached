@@ -189,6 +189,75 @@ func TestAuthenticationDeferStays(t *testing.T) {
 	}
 }
 
+// unknownDeferrer sends new mail with Message-ID <defer@test> to Junk
+// to read again while it has no verdict, as the bridge does with crypto
+// mail.
+type unknownDeferrer struct{ sealer }
+
+func (d unknownDeferrer) Read(ctx context.Context, raw []byte) ([]byte, engine.ReadStatus) {
+	r, ok := engine.AuthResultFrom(ctx)
+	if ok && r.New && r.Status == engine.AuthUnknown && bytes.Contains(raw, []byte("Message-ID: <defer@test>")) {
+		return raw, engine.ReadDefer
+	}
+	return d.sealer.Read(ctx, raw)
+}
+
+// TestAuthenticationStampRenamed checks that mail deferred under a known
+// stamp is released when the provider's new name is learned, though the
+// old name stays trusted throughout.
+func TestAuthenticationStampRenamed(t *testing.T) {
+	const renamed = "mx2.provider.example"
+	e := newEnvConf(t, nil, func(eng *engine.Engine, _ *Server) {
+		eng.Transform = unknownDeferrer{}
+		eng.Authentication, eng.LookupTXT = engine.AuthStandard, lookupTXT
+	})
+	up := login(t, e.provider, nil)
+	if err := up.Create("Junk", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	c := login(t, e.proxy, nil)
+	a := e.eng.Account(alice)
+	waitSyncing(t, e.b, alice)
+
+	// The old name, confirmed by three messages moved back.
+	later := time.Now().Add(time.Minute)
+	for i := range 3 {
+		appendAt(t, up, "INBOX", stamped(fmt.Sprintf("new%d", i), "x@"+senders[i], "pass"), later)
+	}
+	eventually(t, "Junk at the proxy", func() bool { return numIn(t, c, "Junk") == 3 })
+	if _, err := c.Select("Junk", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Move(imap.SeqSetNum(1, 2, 3), "INBOX").Wait(); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the old name confirmed", func() bool {
+		st := a.AuthState()
+		return len(st.Stamp) == 1 && st.Stamp[0] == provider
+	})
+
+	// Stamped by the new name only: no verdict yet.
+	defer1 := append([]byte("Authentication-Results: "+renamed+"; dmarc=pass header.from=x\r\n"),
+		withID(sealed("Defer", "Secret."), "<defer@test>")...)
+	appendAt(t, up, "INBOX", defer1, later.Add(time.Minute))
+	eventually(t, "the message in Junk", func() bool { return numIn(t, up, "Junk") == 1 })
+
+	at := later.Add(2 * time.Minute)
+	for i := range 20 {
+		msg := append([]byte("Authentication-Results: "+renamed+"; dmarc=pass header.from=x\r\n"),
+			withID(plain("x@"+senders[i%len(senders)], fmt.Sprintf("Message renamed%d", i), "Body."), fmt.Sprintf("<renamed%d@test>", i))...)
+		appendAt(t, up, "INBOX", msg, at.Add(time.Duration(i)*time.Second))
+	}
+	eventually(t, "the new name trusted with the old", func() bool {
+		st := a.AuthState()
+		return slices.Contains(st.Stamp, provider) && slices.Contains(st.Stamp, renamed)
+	})
+	eventually(t, "the deferred message back in INBOX", func() bool {
+		e.eng.Recheck()
+		return numIn(t, up, "Junk") == 0 && numIn(t, up, "INBOX") == 24
+	})
+}
+
 // TestAuthenticationStrict checks strict mode: an SPF softfail is deleted
 // even though DMARC passes, and a DMARC failure is junked even under p=none.
 func TestAuthenticationStrict(t *testing.T) {
