@@ -69,9 +69,10 @@ type Cache struct {
 	trimmed map[string]bool
 	statfs  func(dir string) (avail, total uint64, err error) // tests; nil for the system's
 
-	dbMu   sync.Mutex
-	dbs    map[string]*chunkDB // by account folder
-	closed bool
+	dbMu    sync.Mutex
+	dbs     map[string]*chunkDB // by account folder
+	closed  bool
+	touches sync.WaitGroup // the background writes of touch, which Close waits for
 
 	mu    sync.Mutex
 	size  int64
@@ -203,7 +204,12 @@ func (c *Cache) touch(account, key string) {
 	if err != nil {
 		return
 	}
-	go func() { _ = db.touch(key, time.Now()) }()
+	c.dbMu.Lock()
+	defer c.dbMu.Unlock()
+	if c.closed {
+		return
+	}
+	c.touches.Go(func() { _ = db.touch(key, time.Now()) })
 }
 
 // Prune deletes the messages on disk not read for maxAge, and returns how
@@ -338,8 +344,11 @@ func (c *Cache) uncached(account string, keys []string) map[string]bool {
 // Close closes the chunk databases.
 func (c *Cache) Close() error {
 	c.dbMu.Lock()
-	defer c.dbMu.Unlock()
 	c.closed = true
+	c.dbMu.Unlock()
+	c.touches.Wait()
+	c.dbMu.Lock()
+	defer c.dbMu.Unlock()
 	var errs []error
 	for _, db := range c.dbs {
 		errs = append(errs, db.close())

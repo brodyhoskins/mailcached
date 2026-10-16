@@ -302,11 +302,13 @@ func aligned(d, from string) bool {
 // --- Learning the provider's stamp -----------------------------------------
 
 // A name is learned when it is on authShare of the last authWindow INBOX
-// messages, from authSenders domains, or on authConfirm rescues.
+// messages, from authSenders domains, or on authConfirm rescues. A learned
+// name stays learned while it is on authShare of the window, whoever sent
+// it: a run of mail from few senders does not forget it.
 const (
 	authWindow  = 20
 	authShare   = 0.9
-	authSenders = 5
+	authSenders = 3
 	authConfirm = 3
 )
 
@@ -315,6 +317,7 @@ type authLearn struct {
 	mu          sync.Mutex
 	Seen        []authSeen `json:"seen"` // oldest first
 	Examined    int        `json:"examined"`
+	Learned     []string   `json:"learned,omitempty"` // as of the last observe
 	LastStamped time.Time  `json:"last_stamped,omitzero"`
 	// KnownSince: deferred mail from before this is released.
 	KnownSince time.Time             `json:"known_since,omitzero"`
@@ -433,7 +436,7 @@ func (l *authLearn) learned() []string {
 	}
 	var out []string
 	for id, n := range count {
-		if float64(n) >= authShare*float64(len(l.Seen)) && len(senders[id]) >= authSenders {
+		if float64(n) >= authShare*float64(len(l.Seen)) && (len(senders[id]) >= authSenders || slices.Contains(l.Learned, id)) {
 			out = append(out, id)
 		}
 	}
@@ -459,7 +462,8 @@ func (l *authLearn) observe(id string, date time.Time, hdr []byte) bool {
 		l.Seen = l.Seen[len(l.Seen)-authWindow:]
 	}
 	l.Examined++
-	if learned := l.learned(); slices.ContainsFunc(s.Stamps, func(n string) bool { return slices.Contains(learned, n) }) {
+	l.Learned = l.learned()
+	if slices.ContainsFunc(s.Stamps, func(n string) bool { return slices.Contains(l.Learned, n) }) {
 		l.LastStamped = time.Now()
 	}
 	return true

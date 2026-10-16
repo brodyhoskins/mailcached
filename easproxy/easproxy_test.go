@@ -65,7 +65,7 @@ func newEnv(t *testing.T) *env {
 			return engine.Upstream{Addr: addr, TLS: config.TLSNone, Timeout: 5 * time.Second}, login == enginetest.User
 		},
 	}
-	t.Cleanup(e.eng.Close)
+	t.Cleanup(func() { e.eng.Close(); e.eng.Cache.Close() })
 	e.srv = &Server{Engine: e.eng, Log: testLog, Submit: func(_ context.Context, login, password string, env *smtpproxy.Envelope) error {
 		if login != enginetest.User || password != enginetest.Password {
 			return errors.New("bad credentials")

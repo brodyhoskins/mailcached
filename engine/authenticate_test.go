@@ -95,6 +95,29 @@ func TestLearned(t *testing.T) {
 	if got := l.learned(); len(got) != 1 || got[0] != "mx2.provider.example" {
 		t.Fatalf("after the change: %v", got)
 	}
+	// A run of mail from one sender keeps the name.
+	for i := range authWindow {
+		add(200+i, "one.example", "mx2.provider.example")
+	}
+	if got := l.learned(); len(got) != 1 || got[0] != "mx2.provider.example" {
+		t.Fatalf("after mail from one sender: %v", got)
+	}
+}
+
+// TestLearnedSenders checks that a name on mail from fewer than
+// authSenders domains is not learned.
+func TestLearnedSenders(t *testing.T) {
+	l := &authLearn{}
+	t0 := time.Now()
+	for i := range authWindow {
+		domain := []string{"a.example", "b.example"}[i%2]
+		hdr := "Authentication-Results: mx.provider.example; dmarc=pass header.from=" + domain + "\r\n" +
+			"From: a@" + domain + "\r\nMessage-ID: <" + time.Duration(i).String() + "@x>\r\n\r\n"
+		l.observe(identity([]byte(hdr)), t0.Add(time.Duration(i)*time.Minute), []byte(hdr))
+	}
+	if got := l.learned(); got != nil {
+		t.Fatalf("learned from 2 senders: %v", got)
+	}
 }
 
 // kolabHeader is the top of a message Kolab Now delivered: DKIM in its
