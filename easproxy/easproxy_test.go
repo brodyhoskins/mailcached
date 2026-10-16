@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -440,6 +441,18 @@ func TestAutodiscoverAndAuth(t *testing.T) {
 	res.Body.Close()
 	if res.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("wrong password: %d", res.StatusCode)
+	}
+}
+
+// TestAuthorizeRefusal checks that an Authorize hook's refusal is a 401,
+// even when it carries an IMAP response.
+func TestAuthorizeRefusal(t *testing.T) {
+	e := newEnv(t)
+	e.eng.Authorize = func(*engine.Account) error {
+		return fmt.Errorf("%w: %w", engine.ErrLoginRejected, &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeAuthorizationFailed, Text: "no DMARC results"})
+	}
+	if _, status := e.postStatus(t, "FolderSync", nil); status != http.StatusUnauthorized {
+		t.Fatalf("status %d", status)
 	}
 }
 

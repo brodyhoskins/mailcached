@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -189,6 +191,31 @@ func TestSessionAndAuth(t *testing.T) {
 	other := &jmap.Client{SessionURL: e.http.URL + "/.well-known/jmap", User: "eve@example.org", Secret: "x"}
 	if _, err := other.Session(context.Background()); !errors.Is(err, jmap.ErrUnauthorized) {
 		t.Fatalf("unknown user: %v", err)
+	}
+}
+
+// TestAuthorizeRefusal checks that an Authorize hook's refusal is a 401,
+// even when it carries an IMAP response.
+func TestAuthorizeRefusal(t *testing.T) {
+	var refuse atomic.Bool
+	e := newEnvConf(t, func(s *Server) {
+		s.Engine.Authorize = func(*engine.Account) error {
+			if !refuse.Load() {
+				return nil
+			}
+			return fmt.Errorf("%w: %w", engine.ErrLoginRejected, &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeAuthorizationFailed, Text: "no DMARC results"})
+		}
+	})
+	refuse.Store(true)
+	req, _ := http.NewRequest(http.MethodGet, e.http.URL+"/jmap/session", nil)
+	req.SetBasicAuth(enginetest.User, enginetest.Password)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status %d", res.StatusCode)
 	}
 }
 
