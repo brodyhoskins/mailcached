@@ -250,3 +250,57 @@ func TestAuthenticationCopyBack(t *testing.T) {
 		return len(st.Stamp) == 1 && st.Stamp[0] == provider
 	})
 }
+
+// labeler is the sealer, but sends new mail with Message-ID <junk@test>
+// to Junk (ReadJunk), as the bridge does with crypto mail that fails, and
+// puts the verdict it reads with in an X-Verdict field.
+type labeler struct{ sealer }
+
+func (l labeler) Read(ctx context.Context, raw []byte) ([]byte, engine.ReadStatus) {
+	r, ok := engine.AuthResultFrom(ctx)
+	if ok && r.New && bytes.Contains(raw, []byte("Message-ID: <junk@test>")) {
+		return raw, engine.ReadJunk
+	}
+	out, st := l.sealer.Read(ctx, raw)
+	if ok {
+		out = append([]byte("X-Verdict: "+string(r.Status)+"\r\n"), out...)
+	}
+	return out, st
+}
+
+// TestAuthenticationJunkVerdict checks that mail a Transform sends to
+// Junk is read there with its verdict, for the Transform to show.
+func TestAuthenticationJunkVerdict(t *testing.T) {
+	e := newEnvConf(t, nil, func(eng *engine.Engine, _ *Server) {
+		eng.Transform = labeler{}
+		eng.Authentication = engine.AuthStandard
+	})
+	up := login(t, e.provider, nil)
+	if err := up.Create("Junk", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	for i := range 20 {
+		appendAt(t, up, "INBOX", stamped(fmt.Sprintf("old%d", i), "x@"+senders[i%len(senders)], "pass"), old)
+	}
+	c := login(t, e.proxy, nil)
+	a := e.eng.Account(alice)
+	waitSyncing(t, e.b, alice)
+	eventually(t, "the stamp", func() bool { e.eng.Recheck(); return len(a.AuthState().Stamp) == 1 })
+
+	msg := append([]byte("Authentication-Results: "+provider+"; dmarc=pass header.from=x\r\n"),
+		withID(sealed("Junked", "Secret."), "<junk@test>")...)
+	appendAt(t, up, "INBOX", msg, time.Now().Add(time.Minute))
+	eventually(t, "the message in Junk at the proxy", func() bool { return numIn(t, c, "Junk") == 1 })
+	if _, err := c.Select("Junk", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	hdr := &imap.FetchItemBodySection{Specifier: imap.PartSpecifierHeader, HeaderFields: []string{"X-Verdict"}, Peek: true}
+	msgs, err := c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{BodySection: []*imap.FetchItemBodySection{hdr}}).Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(bytes.TrimSpace(msgs[0].FindBodySection(hdr))); got != "X-Verdict: pass" {
+		t.Fatalf("read in Junk with %q", got)
+	}
+}

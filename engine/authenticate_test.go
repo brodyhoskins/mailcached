@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -105,7 +106,7 @@ func TestLearned(t *testing.T) {
 }
 
 // TestLearnedSenders checks that a name on mail from fewer than
-// authSenders domains is not learned.
+// authSenders domains is not learned, but is a candidate.
 func TestLearnedSenders(t *testing.T) {
 	l := &authLearn{}
 	t0 := time.Now()
@@ -117,6 +118,12 @@ func TestLearnedSenders(t *testing.T) {
 	}
 	if got := l.learned(); got != nil {
 		t.Fatalf("learned from 2 senders: %v", got)
+	}
+	a := &Account{b: &Engine{Log: slog.New(slog.DiscardHandler)}}
+	a.learning()
+	a.auth.Seen, a.auth.Examined = l.Seen, l.Examined
+	if st := a.AuthState(); len(st.Stamp) != 0 || !slices.Equal(st.Candidates, []string{"mx.provider.example"}) {
+		t.Fatalf("state: %+v", st)
 	}
 }
 
