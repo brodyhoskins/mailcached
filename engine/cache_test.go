@@ -223,6 +223,35 @@ func setReadAt(t *testing.T, c *Cache, key string, at time.Time) {
 	}
 }
 
+// TestCacheCloseWaits checks that Close waits for a use of the chunk
+// database, such as a write of a message downloaded in the background,
+// and that no use starts after it.
+func TestCacheCloseWaits(t *testing.T) {
+	c := testCache(t, t.TempDir(), false)
+	if err := c.Put(alice, "k", []byte("data"), true); err != nil {
+		t.Fatal(err)
+	}
+	_, done, err := c.use(alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan struct{})
+	go func() {
+		c.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("Close returned during a use")
+	case <-time.After(100 * time.Millisecond):
+	}
+	done()
+	<-closed
+	if err := c.Put(alice, "k2", []byte("data"), true); err == nil {
+		t.Fatal("Put after Close succeeded")
+	}
+}
+
 func TestCachePrune(t *testing.T) {
 	dir := t.TempDir()
 	c := testCache(t, dir, false)

@@ -60,7 +60,8 @@ func (c *Cache) Trim() (int, error) {
 	if err != nil || need <= 0 {
 		return 0, err
 	}
-	dbs, err := c.chunkDBs()
+	dbs, done, err := c.useAll()
+	defer done()
 	type stored struct {
 		db   *chunkDB
 		key  string
