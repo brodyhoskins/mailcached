@@ -119,7 +119,7 @@ func newEnvConf(t *testing.T, wrap func(net.Listener) net.Listener, configure fu
 	}
 	bl := listen(t)
 	go b.Serve(bl)
-	t.Cleanup(func() { b.Close(); eng.Close() })
+	t.Cleanup(func() { b.Close(); eng.Close(); eng.Cache.Close() })
 
 	return &env{provider: ul.Addr().String(), proxy: bl.Addr().String(), eng: eng, b: b}
 }

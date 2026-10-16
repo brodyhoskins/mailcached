@@ -32,7 +32,7 @@ func (e *env) easEngine(t *testing.T) *engine.Engine {
 				login == enginetest.User
 		},
 	}
-	t.Cleanup(eng.Close)
+	t.Cleanup(func() { eng.Close(); eng.Cache.Close() })
 	return eng
 }
 
