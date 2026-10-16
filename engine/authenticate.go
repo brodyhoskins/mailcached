@@ -592,7 +592,7 @@ func (a *Account) logStamp(l *authLearn, before, after []string) {
 // rescue reports whether hdr is a delivery the engine moved away, now back
 // in its origin box: the user vouched for it.
 func (a *Account) rescue(hdr []byte, box string) bool {
-	return a.rescueIf(hdr, func(l *authLearn, key string, m *authMoved) bool {
+	return a.rescueIf(hdr, nil, func(l *authLearn, key string, m *authMoved) bool {
 		if m.Pending && m.Origin == box {
 			// Never left, or came back: no rescue.
 			delete(l.Moved, key)
@@ -603,9 +603,10 @@ func (a *Account) rescue(hdr []byte, box string) bool {
 	})
 }
 
-// rescueMove is rescue for a client's move out of from, to any folder.
-func (a *Account) rescueMove(hdr []byte, from string) bool {
-	return a.rescueIf(hdr, func(_ *authLearn, _ string, m *authMoved) bool { return m.Folder == from })
+// rescueMove is rescue for a client's move out of from, to any folder,
+// of the message cached under key.
+func (a *Account) rescueMove(hdr []byte, from, key string) bool {
+	return a.rescueIf(hdr, []string{key}, func(_ *authLearn, _ string, m *authMoved) bool { return m.Folder == from })
 }
 
 // movingBack returns the headers to rescueMove after a client moves or
@@ -621,14 +622,15 @@ func (a *Account) movingBack(c conn, box, dest string, uids []imap.UID) (map[ima
 	return c.FetchHeaders(box, uids)
 }
 
-func (a *Account) rescueIf(hdr []byte, ok func(l *authLearn, key string, m *authMoved) bool) bool {
+// rescueIf marks the record ok picks rescued. The first time, it drops the
+// final results cached under keys: they were read with the old verdict.
+func (a *Account) rescueIf(hdr []byte, keys []string, ok func(l *authLearn, key string, m *authMoved) bool) bool {
 	ref := refOf(hdr)
 	if ref.id == "" {
 		return false
 	}
 	l := a.learning()
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	var m *authMoved
 	for _, key := range l.keysOf(ref) {
 		if c := l.Moved[key]; c.Action != AuthDelete && ok(l, key, c) {
@@ -637,10 +639,12 @@ func (a *Account) rescueIf(hdr []byte, ok func(l *authLearn, key string, m *auth
 		}
 	}
 	if m == nil {
+		l.mu.Unlock()
 		return false
 	}
 	m.Pending = false
 	if m.Rescued {
+		l.mu.Unlock()
 		return true
 	}
 	id := ref.id
@@ -661,8 +665,26 @@ func (a *Account) rescueIf(hdr []byte, ok func(l *authLearn, key string, m *auth
 			}
 		}
 	}
+	// Without l.mu, which a folder rename takes inside a Store transaction.
+	// Before the save: if it stops in between, the next rescue drops again.
+	l.mu.Unlock()
+	a.dropFinal(keys)
+	l.mu.Lock()
 	a.saveLearning(l)
+	l.mu.Unlock()
 	return true
+}
+
+func (a *Account) dropFinal(keys []string) {
+	keys = slices.DeleteFunc(slices.Clone(keys), func(k string) bool { return k == "" })
+	for _, key := range keys {
+		if err := a.b.Cache.Delete(a.login, key); err != nil {
+			a.b.Log.Warn("cache delete failed", "user", a.login, "err", err)
+		}
+	}
+	if err := a.b.Store.deleteHeaders(a.login, keys); err != nil {
+		a.b.Log.Warn("could not delete header entries", "user", a.login, "err", err)
+	}
 }
 
 func (a *Account) rescued(hdr []byte) bool {
