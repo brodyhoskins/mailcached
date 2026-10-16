@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -253,7 +255,8 @@ func TestAuthenticationCopyBack(t *testing.T) {
 
 // labeler is the sealer, but sends new mail with Message-ID <junk@test>
 // to Junk (ReadJunk), as the bridge does with crypto mail that fails, and
-// puts the verdict it reads with in an X-Verdict field.
+// puts the verdict it reads with in an X-Verdict field, "rescued" after
+// it if moved back by the user.
 type labeler struct{ sealer }
 
 func (l labeler) Read(ctx context.Context, raw []byte) ([]byte, engine.ReadStatus) {
@@ -263,7 +266,11 @@ func (l labeler) Read(ctx context.Context, raw []byte) ([]byte, engine.ReadStatu
 	}
 	out, st := l.sealer.Read(ctx, raw)
 	if ok {
-		out = append([]byte("X-Verdict: "+string(r.Status)+"\r\n"), out...)
+		v := string(r.Status)
+		if r.Rescued {
+			v += " rescued"
+		}
+		out = append([]byte("X-Verdict: "+v+"\r\n"), out...)
 	}
 	return out, st
 }
@@ -271,6 +278,30 @@ func (l labeler) Read(ctx context.Context, raw []byte) ([]byte, engine.ReadStatu
 // TestAuthenticationJunkVerdict checks that mail a Transform sends to
 // Junk is read there with its verdict, for the Transform to show.
 func TestAuthenticationJunkVerdict(t *testing.T) {
+	_, c := junkedEnv(t)
+	if got := verdictIn(t, c, "Junk"); got != "X-Verdict: pass" {
+		t.Fatalf("read in Junk with %q", got)
+	}
+}
+
+// TestAuthenticationRescueRereads checks that a message read in Junk and
+// moved back by a client is read again as rescued, not shown with the
+// result cached in Junk.
+func TestAuthenticationRescueRereads(t *testing.T) {
+	_, c := junkedEnv(t)
+	if got := verdictIn(t, c, "Junk"); got != "X-Verdict: pass" {
+		t.Fatalf("read in Junk with %q", got)
+	}
+	if _, err := c.Move(imap.SeqSetNum(1), "INBOX").Wait(); err != nil {
+		t.Fatal(err)
+	}
+	// The rescue runs when the queued move reaches the provider.
+	eventually(t, "the rescued verdict in INBOX", func() bool { return verdictIn(t, c, "INBOX") == "X-Verdict: pass rescued" })
+}
+
+// junkedEnv is a proxy with the labeler that sent one new message to Junk.
+func junkedEnv(t *testing.T) (*env, *imapclient.Client) {
+	t.Helper()
 	e := newEnvConf(t, nil, func(eng *engine.Engine, _ *Server) {
 		eng.Transform = labeler{}
 		eng.Authentication = engine.AuthStandard
@@ -292,15 +323,33 @@ func TestAuthenticationJunkVerdict(t *testing.T) {
 		withID(sealed("Junked", "Secret."), "<junk@test>")...)
 	appendAt(t, up, "INBOX", msg, time.Now().Add(time.Minute))
 	eventually(t, "the message in Junk at the proxy", func() bool { return numIn(t, c, "Junk") == 1 })
-	if _, err := c.Select("Junk", nil).Wait(); err != nil {
+	return e, c
+}
+
+// verdictIn returns the X-Verdict field of the message "Junked" in box.
+func verdictIn(t *testing.T, c *imapclient.Client, box string) string {
+	t.Helper()
+	if _, err := c.Select(box, nil).Wait(); err != nil {
 		t.Fatal(err)
 	}
-	hdr := &imap.FetchItemBodySection{Specifier: imap.PartSpecifierHeader, HeaderFields: []string{"X-Verdict"}, Peek: true}
-	msgs, err := c.Fetch(imap.SeqSetNum(1), &imap.FetchOptions{BodySection: []*imap.FetchItemBodySection{hdr}}).Collect()
+	hdr := &imap.FetchItemBodySection{Specifier: imap.PartSpecifierHeader, HeaderFields: []string{"Subject", "X-Verdict"}, Peek: true}
+	var all imap.SeqSet
+	all.AddRange(1, 0)
+	msgs, err := c.Fetch(all, &imap.FetchOptions{BodySection: []*imap.FetchItemBodySection{hdr}}).Collect()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(bytes.TrimSpace(msgs[0].FindBodySection(hdr))); got != "X-Verdict: pass" {
-		t.Fatalf("read in Junk with %q", got)
+	for _, m := range msgs {
+		fields := strings.Split(string(m.FindBodySection(hdr)), "\r\n")
+		if !slices.Contains(fields, "Subject: Junked") {
+			continue
+		}
+		for _, f := range fields {
+			if strings.HasPrefix(f, "X-Verdict:") {
+				return f
+			}
+		}
 	}
+	t.Fatalf("no message Junked in %s", box)
+	return ""
 }

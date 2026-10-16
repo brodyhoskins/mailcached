@@ -377,7 +377,7 @@ func TestRescueSameDelivery(t *testing.T) {
 	// A client's move through the proxy rescues from where it was moved,
 	// to any folder.
 	l.Moved[refOf(moved).key("INBOX")] = &authMoved{Action: AuthJunk, Folder: "Junk", Origin: "INBOX", Copy: copyOf(moved)}
-	if a.rescueMove(moved, "Trash") || !a.rescueMove(moved, "Junk") || !a.rescued(moved) {
+	if a.rescueMove(moved, "Trash", "") || !a.rescueMove(moved, "Junk", "") || !a.rescued(moved) {
 		t.Error("a move out of Junk to another folder not rescued")
 	}
 }

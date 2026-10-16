@@ -363,6 +363,14 @@ func pUIDs(msgs []*Message) []imap.UID {
 	return out
 }
 
+// keyAt returns the key of the message at provider uid, or "".
+func keyAt(msgs []*Message, uid imap.UID) string {
+	if i := slices.IndexFunc(msgs, func(m *Message) bool { return m.pUID == uid }); i >= 0 {
+		return msgs[i].key
+	}
+	return ""
+}
+
 // runFlags makes o, which merges group.
 func (a *Account) runFlags(o *op, group []*op) error {
 	a.mu.Lock()
@@ -488,8 +496,8 @@ func (a *Account) runMove(o *op, group []*op) error {
 		if err != nil {
 			return err
 		}
-		for _, e := range hdrs {
-			a.rescueMove(e.Header, box)
+		for uid, e := range hdrs {
+			a.rescueMove(e.Header, box, keyAt(msgs, uid))
 		}
 		a.mu.Lock()
 		tx := a.begin()
@@ -597,8 +605,8 @@ func (a *Account) runCopy(o *op, group []*op) error {
 		if err != nil {
 			return err
 		}
-		for _, e := range hdrs {
-			a.rescueMove(e.Header, box)
+		for uid, e := range hdrs {
+			a.rescueMove(e.Header, box, keyAt(srcs, uid))
 		}
 		a.mu.Lock()
 		tx := a.begin()
