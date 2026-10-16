@@ -78,6 +78,14 @@ type Engine struct {
 	// Transform changes messages between the provider and clients; nil
 	// serves them unchanged.
 	Transform Transform
+	// Authentication is the sender authentication mode; "" is off.
+	Authentication AuthMode
+	// LookupTXT overrides DNS for DMARC lookups in tests.
+	LookupTXT    func(ctx context.Context, name string) ([]string, error)
+	dmarcMu      sync.Mutex
+	dmarcRecords map[string]dmarcEntry
+	// Authorize, if set, runs after each login; an error refuses it.
+	Authorize func(a *Account) error
 	Cache     *Cache
 	// Store keeps the mailbox state on disk across restarts; nil keeps it
 	// in memory only.

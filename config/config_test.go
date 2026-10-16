@@ -216,3 +216,24 @@ accounts:
 		t.Errorf("smtp source %q, want the default tailscale0", u.Source)
 	}
 }
+
+func TestAuthentication(t *testing.T) {
+	c, err := load(t, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Authentication != "standard" {
+		t.Errorf("default: %q", c.Authentication)
+	}
+	if c, err := load(t, base+"authentication: strict\n"); err != nil || c.Authentication != "strict" {
+		t.Errorf("strict: %v %+v", err, c)
+	}
+	if c, err := load(t, base+"authentication: off\n"); err != nil || c.Authentication != "off" {
+		t.Errorf("off: %v %+v", err, c)
+	}
+	for _, bad := range []string{"authentication: lax\n", "authentication: {action: junk}\n"} {
+		if _, err := load(t, base+bad); err == nil {
+			t.Errorf("%s: accepted", bad)
+		}
+	}
+}

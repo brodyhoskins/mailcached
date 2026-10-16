@@ -68,6 +68,9 @@ type Account struct {
 	// held messages being read (hold.go).
 	since    time.Time
 	holdBusy map[string]bool
+	authOnce sync.Once
+	auth     *authLearn
+	tending  atomic.Bool
 
 	// refs counts, per cache key, the messages in all folders that use it
 	// (a.mu held). A key no folder uses becomes an orphan; its cached copy
