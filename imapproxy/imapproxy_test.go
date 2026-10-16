@@ -2,6 +2,7 @@ package imapproxy
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -510,6 +511,25 @@ func TestBadPassword(t *testing.T) {
 	defer c.Close()
 	if err := c.Login(alice, "wrong").Wait(); err == nil {
 		t.Fatal("login with a wrong password succeeded")
+	}
+}
+
+// TestAuthorizeRefusalText checks that a client sees the code and text of
+// an Authorize hook's refusal, not a bare AUTHENTICATIONFAILED.
+func TestAuthorizeRefusalText(t *testing.T) {
+	refusal := &imap.Error{Type: imap.StatusResponseTypeNo, Code: imap.ResponseCodeAuthorizationFailed, Text: "this provider does not report DMARC results"}
+	e := newEnvConf(t, nil, func(eng *engine.Engine, _ *Server) {
+		eng.Authorize = func(*engine.Account) error { return fmt.Errorf("%w: %w", engine.ErrLoginRejected, refusal) }
+	})
+	c, err := imapclient.DialInsecure(e.proxy, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	err = c.Login(alice, password).Wait()
+	var ie *imap.Error
+	if !errors.As(err, &ie) || ie.Code != refusal.Code || ie.Text != refusal.Text {
+		t.Fatalf("login: %v", err)
 	}
 }
 

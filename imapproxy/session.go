@@ -95,6 +95,11 @@ func (s *Session) Login(username, password string) error {
 	if err := a.Login(password); err != nil {
 		if errors.Is(err, engine.ErrLoginRejected) || errors.Is(err, engine.ErrNoAccount) {
 			s.b.Log.Info("imap: login rejected", "user", username, "remote", remote)
+			// A rejection may carry its own response, as an Authorize hook's does.
+			var ie *imap.Error
+			if errors.Is(err, engine.ErrLoginRejected) && errors.As(err, &ie) {
+				return ie
+			}
 			return imapserver.ErrAuthFailed
 		}
 		s.b.Log.Error("imap: upstream login failed", "user", username, "err", err)
