@@ -110,7 +110,7 @@ type Account struct {
 	credMu   sync.Mutex
 	password string
 	upstream Upstream
-	prov     provider      // for upstream; nil before the first login
+	prov     Provider      // for upstream; nil before the first login
 	running  bool          // the engine is running
 	changed  chan struct{} // the credentials changed: reconnect
 	notify   chan struct{} // the provider reported a change
@@ -419,7 +419,7 @@ var ErrNoCredentials = errors.New("no credentials for the account")
 
 // providerFor returns the provider for u, replacing the one for another
 // upstream.
-func (a *Account) providerFor(u Upstream) provider {
+func (a *Account) providerFor(u Upstream) Provider {
 	a.credMu.Lock()
 	defer a.credMu.Unlock()
 	if a.prov != nil && a.upstream.same(u) {
@@ -438,7 +438,7 @@ func (a *Account) providerFor(u Upstream) provider {
 }
 
 // newProvider makes the provider for u.
-func (b *Engine) newProvider(a *Account, u Upstream) provider {
+func (b *Engine) newProvider(a *Account, u Upstream) Provider {
 	password := func() string {
 		a.credMu.Lock()
 		defer a.credMu.Unlock()
@@ -446,6 +446,11 @@ func (b *Engine) newProvider(a *Account, u Upstream) provider {
 			return ""
 		}
 		return a.password
+	}
+	if b.NewProvider != nil {
+		if p, ok := b.NewProvider(a.login, u, slices.Clone(b.syncSection().HeaderFields), password); ok {
+			return p
+		}
 	}
 	if u.URL != "" {
 		return newJMAPProvider(a, u, password)
@@ -463,7 +468,7 @@ func (b *Engine) newProvider(a *Account, u Upstream) provider {
 
 // conn returns a provider connection for one request. hint names the
 // folder it is about, "" for none. Call its Release.
-func (a *Account) conn(p priority, hint string) (conn, error) {
+func (a *Account) conn(p Priority, hint string) (Conn, error) {
 	a.credMu.Lock()
 	prov := a.prov
 	a.credMu.Unlock()
@@ -709,7 +714,7 @@ func (a *Account) lockFolders(names ...string) func() {
 
 // resync brings the proxy's copy of one folder up to date over c. Cheap
 // when nothing changed.
-func (a *Account) resync(c conn, name string) error {
+func (a *Account) resync(c Conn, name string) error {
 	defer a.lockFolders(name)()
 	return a.resyncLocked(c, CanonicalName(name), false)
 }
@@ -723,14 +728,14 @@ func (a *Account) resync(c conn, name string) error {
 // made without saying where to. Only messages left over are new. Messages
 // clients see that the provider has nowhere and no queued change will
 // bring are then removed.
-func (a *Account) resyncLocked(c conn, name string, force bool) error {
+func (a *Account) resyncLocked(c Conn, name string, force bool) error {
 	a.mu.Lock()
 	m := a.box(name)
-	st := syncState{
-		validity: m.pUIDValidity, next: m.pUIDNext, modSeq: m.highestModSeq, count: len(m.atP),
-		synced: !m.synced.IsZero(), stale: m.stale, force: force,
-		refetchFlags: m.refetchFlags, flagsFull: m.flagsFull,
-		known: func(u imap.UID) bool {
+	st := SyncState{
+		Validity: m.pUIDValidity, Next: m.pUIDNext, ModSeq: m.highestModSeq, Count: len(m.atP),
+		Synced: !m.synced.IsZero(), Stale: m.stale, Force: force,
+		RefetchFlags: m.refetchFlags, FlagsFull: m.flagsFull,
+		Known: func(u imap.UID) bool {
 			a.mu.Lock()
 			defer a.mu.Unlock()
 			m := a.boxes[name]
@@ -744,49 +749,49 @@ func (a *Account) resyncLocked(c conn, name string, force bool) error {
 	if err != nil {
 		return err
 	}
-	a.awaitNewMail(name, d.fresh, d.reset)
+	a.awaitNewMail(name, d.Fresh, d.Reset)
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	m = a.box(name)
-	if d.unchanged {
+	if d.Unchanged {
 		m.synced = time.Now()
 		return nil
 	}
 	// Mail that arrives after the folder's first sync is new: downloaded
 	// right away, before clients are told if it takes no longer than
 	// NewMailWait (newmail.go), after if it does.
-	known := !d.reset && m.pUIDNext > 0
+	known := !d.Reset && m.pUIDNext > 0
 	tx := a.begin()
-	if d.reset {
+	if d.Reset {
 		for _, msg := range m.atP {
 			a.lose(msg, tx)
 		}
 	}
-	if d.present != nil {
+	if d.Present != nil {
 		for u, msg := range m.atP {
-			if !d.present[u] {
+			if !d.Present[u] {
 				a.lose(msg, tx)
 			}
 		}
 	}
-	for _, u := range d.gone {
+	for _, u := range d.Gone {
 		if msg := m.atP[u]; msg != nil {
 			a.lose(msg, tx)
 		}
 	}
-	for _, f := range d.flags {
-		if msg := m.atP[f.uid]; msg != nil && msg.pending == 0 {
-			a.setFlags(msg, f.flags, nil, tx)
+	for _, f := range d.Flags {
+		if msg := m.atP[f.UID]; msg != nil && msg.pending == 0 {
+			a.setFlags(msg, f.Flags, nil, tx)
 		}
 	}
 
-	fresh := slices.Clone(d.fresh)
-	slices.SortFunc(fresh, func(x, y freshMessage) int { return cmp.Compare(x.uid, y.uid) })
+	fresh := slices.Clone(d.Fresh)
+	slices.SortFunc(fresh, func(x, y FreshMessage) int { return cmp.Compare(x.UID, y.UID) })
 	var unbound map[string][]*Message
 	var added, held, ahead []*Message
 	for _, f := range fresh {
-		if m.atP[f.uid] != nil {
+		if m.atP[f.UID] != nil {
 			continue
 		}
 		key := a.keyFor(f)
@@ -801,18 +806,18 @@ func (a *Account) resyncLocked(c conn, name string, force bool) error {
 		if l := unbound[key]; key != "" && len(l) > 0 {
 			msg := l[0]
 			unbound[key] = l[1:]
-			a.bind(msg, name, f.uid, tx)
+			a.bind(msg, name, f.UID, tx)
 			if msg.pending == 0 {
-				a.setFlags(msg, f.flags, nil, tx)
+				a.setFlags(msg, f.Flags, nil, tx)
 			}
 			continue
 		}
-		msg := &Message{id: uuid.NewV7(), flags: f.flags, date: f.date, key: key, direct: a.b.direct(f.header)}
+		msg := &Message{id: uuid.NewV7(), flags: f.Flags, date: f.Date, key: key, direct: a.b.direct(f.Header)}
 		if key == "" {
 			msg.key = idKey(a.login, msg.id)
 		}
 		a.byID[msg.id] = msg
-		a.bind(msg, name, f.uid, tx)
+		a.bind(msg, name, f.UID, tx)
 		if a.mustCheck(msg) {
 			// New mail the Transform changes: read before clients see it.
 			msg.held = true
@@ -825,7 +830,7 @@ func (a *Account) resyncLocked(c conn, name string, force bool) error {
 		// New mail is downloaded ahead of clients, but a large message
 		// the proxy does not change waits: a client may read only part of
 		// it (piece.go).
-		if !msg.direct || f.size <= PieceWhole {
+		if !msg.direct || f.Size <= PieceWhole {
 			ahead = append(ahead, msg)
 		}
 	}
@@ -844,19 +849,19 @@ func (a *Account) resyncLocked(c conn, name string, force bool) error {
 		go a.prefetch(ahead)
 	}
 
-	m.pUIDValidity, m.pUIDNext, m.highestModSeq = d.validity, d.next, d.modSeq
-	if !sameFlags(m.flags, d.folderFlags) {
-		m.flags = d.folderFlags
-		m.tracker.QueueMailboxFlags(d.folderFlags)
+	m.pUIDValidity, m.pUIDNext, m.highestModSeq = d.Validity, d.Next, d.ModSeq
+	if !sameFlags(m.flags, d.FolderFlags) {
+		m.flags = d.FolderFlags
+		m.tracker.QueueMailboxFlags(d.FolderFlags)
 	}
 	// A read-only SELECT reports no permanent flags; clients still change
 	// flags through the proxy, which does it read-write.
-	m.permanentFlags = d.permanentFlags
+	m.permanentFlags = d.PermanentFlags
 	if len(m.permanentFlags) == 0 {
-		m.permanentFlags = append(slices.Clone(d.folderFlags), imap.FlagWildcard)
+		m.permanentFlags = append(slices.Clone(d.FolderFlags), imap.FlagWildcard)
 	}
 	m.synced, m.stale = time.Now(), false
-	if d.fullFlags {
+	if d.FullFlags {
 		m.flagsFull, m.refetchFlags = m.synced, false
 	}
 	tx.putMailbox(m)
@@ -881,9 +886,9 @@ func (b *Engine) syncSection() *imap.FetchItemBodySection {
 
 // keyFor computes a message's cache key: its fingerprint, or "" without a
 // Message-ID.
-func (a *Account) keyFor(f freshMessage) string {
-	if id := parseHeader(f.header).Get("Message-Id"); id != "" && f.size > 0 {
-		return fingerprintKey(a.login, strings.TrimSpace(id), f.size, f.date)
+func (a *Account) keyFor(f FreshMessage) string {
+	if id := parseHeader(f.Header).Get("Message-Id"); id != "" && f.Size > 0 {
+		return fingerprintKey(a.login, strings.TrimSpace(id), f.Size, f.Date)
 	}
 	return ""
 }
@@ -908,7 +913,7 @@ func (b *Engine) direct(hdr []byte) bool {
 var fullFlagInterval = 10 * time.Minute
 
 // refreshList reads the folder list from the provider.
-func (a *Account) refreshList(c conn) error {
+func (a *Account) refreshList(c Conn) error {
 	a.listMu.Lock()
 	defer a.listMu.Unlock()
 	list, err := c.List()
@@ -920,15 +925,15 @@ func (a *Account) refreshList(c conn) error {
 	tx := a.begin()
 	seen := map[string]bool{}
 	for _, f := range list {
-		seen[f.name] = true
-		if f.delim != 0 {
-			a.delim = f.delim
+		seen[f.Name] = true
+		if f.Delim != 0 {
+			a.delim = f.Delim
 		}
-		m := a.box(f.name)
-		if m.delim != f.delim || !slices.Equal(m.attrs, f.attrs) || m.selectable != f.selectable || m.subscribed != f.subscribed {
+		m := a.box(f.Name)
+		if m.delim != f.Delim || !slices.Equal(m.attrs, f.Attrs) || m.selectable != f.Selectable || m.subscribed != f.Subscribed {
 			a.log.touch(KindMailbox, m.jmapID, false)
 		}
-		m.delim, m.attrs, m.selectable, m.subscribed = f.delim, f.attrs, f.selectable, f.subscribed
+		m.delim, m.attrs, m.selectable, m.subscribed = f.Delim, f.Attrs, f.Selectable, f.Subscribed
 		tx.putMailbox(m)
 	}
 	for name, m := range a.boxes {
@@ -983,7 +988,7 @@ func (a *Account) syncLater(name string) {
 }
 
 func (a *Account) syncNow(name string) error {
-	c, err := a.conn(interactive, "")
+	c, err := a.conn(PriorityInteractive, "")
 	if err != nil {
 		return err
 	}
@@ -994,7 +999,7 @@ func (a *Account) syncNow(name string) error {
 
 // listNow refreshes the folder list over a pool connection.
 func (a *Account) listNow() error {
-	c, err := a.conn(interactive, "")
+	c, err := a.conn(PriorityInteractive, "")
 	if err != nil {
 		return err
 	}

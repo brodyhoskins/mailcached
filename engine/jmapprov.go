@@ -184,7 +184,7 @@ func (p *jmapProvider) session(ctx context.Context) (*jmap.Client, jmap.ID, erro
 	return c, s.MailAccount(), nil
 }
 
-func (p *jmapProvider) Conn(priority, string) (conn, error) { return &jmapConn{p: p}, nil }
+func (p *jmapProvider) Conn(Priority, string) (Conn, error) { return &jmapConn{p: p}, nil }
 
 func (p *jmapProvider) Close() {}
 
@@ -768,7 +768,7 @@ func (c *jmapConn) ctx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), c.p.timeout())
 }
 
-func (c *jmapConn) List() ([]folderInfo, error) {
+func (c *jmapConn) List() ([]FolderInfo, error) {
 	ctx, cancel := c.ctx()
 	defer cancel()
 	p := c.p
@@ -780,22 +780,22 @@ func (c *jmapConn) List() ([]folderInfo, error) {
 	attrs := map[string]imap.MailboxAttr{"all": imap.MailboxAttrAll, "archive": imap.MailboxAttrArchive,
 		"drafts": imap.MailboxAttrDrafts, "flagged": imap.MailboxAttrFlagged, "junk": imap.MailboxAttrJunk,
 		"sent": imap.MailboxAttrSent, "trash": imap.MailboxAttrTrash}
-	out := make([]folderInfo, 0, len(p.boxes))
+	out := make([]FolderInfo, 0, len(p.boxes))
 	for _, b := range p.boxes {
-		f := folderInfo{name: b.name, delim: '/', subscribed: b.subscribed, selectable: true}
+		f := FolderInfo{Name: b.name, Delim: '/', Subscribed: b.subscribed, Selectable: true}
 		if a, ok := attrs[b.role]; ok {
-			f.attrs = []imap.MailboxAttr{a}
+			f.Attrs = []imap.MailboxAttr{a}
 		}
 		out = append(out, f)
 	}
 	return out, nil
 }
 
-func (c *jmapConn) Sync(name string, st syncState) (*delta, error) {
+func (c *jmapConn) Sync(name string, st SyncState) (*Delta, error) {
 	ctx, cancel := c.ctx()
 	defer cancel()
 	p := c.p
-	if err := p.refresh(ctx, st.force); err != nil {
+	if err := p.refresh(ctx, st.Force); err != nil {
 		return nil, err
 	}
 	b, err := p.box(name)
@@ -803,12 +803,12 @@ func (c *jmapConn) Sync(name string, st syncState) (*delta, error) {
 		return nil, err
 	}
 	p.mu.Lock()
-	reset := st.validity != 0 && st.validity != b.validity
-	unchanged := !st.force && !st.stale && !st.refetchFlags && st.synced && !reset && st.validity == b.validity &&
-		st.next == b.next && st.count == len(b.emailAt) && st.modSeq == uint64(p.modseq)
+	reset := st.Validity != 0 && st.Validity != b.validity
+	unchanged := !st.Force && !st.Stale && !st.RefetchFlags && st.Synced && !reset && st.Validity == b.validity &&
+		st.Next == b.next && st.Count == len(b.emailAt) && st.ModSeq == uint64(p.modseq)
 	if unchanged {
 		p.mu.Unlock()
-		return &delta{unchanged: true}, nil
+		return &Delta{Unchanged: true}, nil
 	}
 	all := make([]imap.UID, 0, len(b.emailAt))
 	for u := range b.emailAt {
@@ -820,13 +820,13 @@ func (c *jmapConn) Sync(name string, st syncState) (*delta, error) {
 	var fresh, changed []imap.UID
 	for _, u := range all {
 		switch {
-		case reset || st.validity == 0 || u >= st.next || !st.known(u):
+		case reset || st.Validity == 0 || u >= st.Next || !st.Known(u):
 			fresh = append(fresh, u)
-		case st.refetchFlags:
+		case st.RefetchFlags:
 			changed = append(changed, u)
 		default:
 			p.mu.Lock()
-			if b.seq[u] > int64(st.modSeq) {
+			if b.seq[u] > int64(st.ModSeq) {
 				changed = append(changed, u)
 			}
 			p.mu.Unlock()
@@ -838,23 +838,23 @@ func (c *jmapConn) Sync(name string, st syncState) (*delta, error) {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	d := &delta{reset: reset, present: map[imap.UID]bool{}, validity: b.validity, next: b.next, modSeq: uint64(p.modseq),
-		folderFlags: jmapFlags, permanentFlags: append(slices.Clone(jmapFlags), imap.FlagWildcard),
-		fullFlags: reset || st.refetchFlags}
+	d := &Delta{Reset: reset, Present: map[imap.UID]bool{}, Validity: b.validity, Next: b.next, ModSeq: uint64(p.modseq),
+		FolderFlags: jmapFlags, PermanentFlags: append(slices.Clone(jmapFlags), imap.FlagWildcard),
+		FullFlags: reset || st.RefetchFlags}
 	for _, u := range all {
-		d.present[u] = true
+		d.Present[u] = true
 	}
 	for _, u := range fresh {
 		e := p.emails[b.emailAt[u]]
 		if e == nil {
-			delete(d.present, u) // gone meanwhile
+			delete(d.Present, u) // gone meanwhile
 			continue
 		}
-		d.fresh = append(d.fresh, freshMessage{uid: u, flags: flagsOf(e, b, u), date: e.received, size: e.size, header: e.header})
+		d.Fresh = append(d.Fresh, FreshMessage{UID: u, Flags: flagsOf(e, b, u), Date: e.received, Size: e.size, Header: e.header})
 	}
 	for _, u := range changed {
 		if e := p.emails[b.emailAt[u]]; e != nil {
-			d.flags = append(d.flags, flagUpdate{u, flagsOf(e, b, u)})
+			d.Flags = append(d.Flags, FlagUpdate{u, flagsOf(e, b, u)})
 		}
 	}
 	return d, nil
@@ -884,12 +884,12 @@ func (c *jmapConn) blobs(ctx context.Context, name string, uids []imap.UID) (*jb
 // FetchSections: JMAP has no byte ranges, and its part downloads are
 // decoded, so messages are read whole.
 func (c *jmapConn) FetchSections(string, []imap.UID, []Section, func(imap.UID, int, []byte)) error {
-	return errNoPieces
+	return ErrNoPieces
 }
 
 // Search: JMAP's Email/query could, but the proxy reads the messages.
 func (c *jmapConn) Search(string, *imap.SearchCriteria) ([]imap.UID, error) {
-	return nil, errNoSearch
+	return nil, ErrNoSearch
 }
 
 func (c *jmapConn) FetchFull(name string, uids []imap.UID, each func(uid imap.UID, raw []byte)) error {
@@ -1271,7 +1271,7 @@ type jmapWatch struct {
 	push   string // how: "websocket", "eventsource" or "none"
 }
 
-func (p *jmapProvider) Watch(notify func()) (watchConn, error) {
+func (p *jmapProvider) Watch(notify func()) (WatchConn, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	c, _, err := p.session(ctx)
 	if err != nil {
@@ -1338,15 +1338,15 @@ func (w *jmapWatch) Describe() []any { return []any{"jmap_push", w.push} }
 
 // Wait returns when the provider pushed a change, or after d, with the
 // folders that changed.
-func (w *jmapWatch) Wait(ctx context.Context, d time.Duration, changed, wake <-chan struct{}) (wakeup, error) {
+func (w *jmapWatch) Wait(ctx context.Context, d time.Duration, changed, wake <-chan struct{}) (Wakeup, error) {
 	timer := time.NewTimer(max(d, 0))
 	defer timer.Stop()
 	force := false
 	select {
 	case <-ctx.Done():
-		return wakeup{}, ctx.Err()
+		return Wakeup{}, ctx.Err()
 	case <-changed:
-		return wakeup{}, errCredentialsChanged
+		return Wakeup{}, ErrCredentialsChanged
 	case <-wake:
 	case <-timer.C:
 		force = !w.pushed
@@ -1354,7 +1354,7 @@ func (w *jmapWatch) Wait(ctx context.Context, d time.Duration, changed, wake <-c
 	rctx, cancel := context.WithTimeout(ctx, w.p.timeout())
 	defer cancel()
 	if err := w.p.refresh(rctx, force); err != nil {
-		return wakeup{}, err
+		return Wakeup{}, err
 	}
 	p := w.p
 	p.mu.Lock()
@@ -1369,7 +1369,7 @@ func (w *jmapWatch) Wait(ctx context.Context, d time.Duration, changed, wake <-c
 	slices.Sort(names)
 	list := p.listChanged
 	p.listChanged = false
-	return wakeup{names: names, list: list}, nil
+	return Wakeup{Names: names, List: list}, nil
 }
 
 // Notifies reports whether the provider pushes changes: it pushes every

@@ -230,7 +230,7 @@ func (p *easProvider) do(ctx context.Context, cmd string, doc *wbxml.Node) (*wbx
 	return n, easRejected(err)
 }
 
-func (p *easProvider) Conn(priority, string) (conn, error) { return &easConn{p: p}, nil }
+func (p *easProvider) Conn(Priority, string) (Conn, error) { return &easConn{p: p}, nil }
 
 func (p *easProvider) Close() {}
 
@@ -858,7 +858,7 @@ type easConn struct {
 
 func (c *easConn) Release(error) {}
 
-func (c *easConn) List() ([]folderInfo, error) {
+func (c *easConn) List() ([]FolderInfo, error) {
 	ctx, cancel := c.p.ctx()
 	defer cancel()
 	p := c.p
@@ -868,14 +868,14 @@ func (c *easConn) List() ([]folderInfo, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	attrs := map[int]imap.MailboxAttr{easDrafts: imap.MailboxAttrDrafts, easTrash: imap.MailboxAttrTrash, easSent: imap.MailboxAttrSent}
-	var out []folderInfo
+	var out []FolderInfo
 	for _, f := range p.folders {
 		if !easMail(f.typ) {
 			continue
 		}
-		fi := folderInfo{name: f.name, delim: '/', subscribed: true, selectable: true}
+		fi := FolderInfo{Name: f.name, Delim: '/', Subscribed: true, Selectable: true}
 		if a, ok := attrs[f.typ]; ok {
-			fi.attrs = []imap.MailboxAttr{a}
+			fi.Attrs = []imap.MailboxAttr{a}
 		}
 		out = append(out, fi)
 	}
@@ -886,7 +886,7 @@ func (c *easConn) List() ([]folderInfo, error) {
 // those the provider keeps.
 var easFlagsAll = []imap.Flag{imap.FlagSeen, imap.FlagAnswered, imap.FlagFlagged, imap.FlagDraft, imap.FlagDeleted}
 
-func (c *easConn) Sync(name string, st syncState) (*delta, error) {
+func (c *easConn) Sync(name string, st SyncState) (*Delta, error) {
 	p := c.p
 	if err := p.ensureLoaded(); err != nil {
 		return nil, err
@@ -913,12 +913,12 @@ func (c *easConn) Sync(name string, st syncState) (*delta, error) {
 	}
 
 	p.mu.Lock()
-	reset := st.validity != 0 && st.validity != f.validity
-	unchanged := !st.force && !st.stale && !st.refetchFlags && st.synced && !reset && st.validity == f.validity &&
-		st.next == f.next && st.count == len(f.items) && st.modSeq == uint64(p.modseq)
+	reset := st.Validity != 0 && st.Validity != f.validity
+	unchanged := !st.Force && !st.Stale && !st.RefetchFlags && st.Synced && !reset && st.Validity == f.validity &&
+		st.Next == f.next && st.Count == len(f.items) && st.ModSeq == uint64(p.modseq)
 	if unchanged {
 		p.mu.Unlock()
-		return &delta{unchanged: true}, nil
+		return &Delta{Unchanged: true}, nil
 	}
 	all := make([]imap.UID, 0, len(f.items))
 	for u := range f.items {
@@ -930,7 +930,7 @@ func (c *easConn) Sync(name string, st syncState) (*delta, error) {
 	var needHeader map[imap.UID]string
 	for _, u := range all {
 		switch {
-		case reset || st.validity == 0 || u >= st.next || !st.known(u):
+		case reset || st.Validity == 0 || u >= st.Next || !st.Known(u):
 			fresh = append(fresh, u)
 			p.mu.Lock()
 			if it := f.items[u]; it != nil && it.header == nil {
@@ -940,11 +940,11 @@ func (c *easConn) Sync(name string, st syncState) (*delta, error) {
 				needHeader[u] = it.sid
 			}
 			p.mu.Unlock()
-		case st.refetchFlags:
+		case st.RefetchFlags:
 			changed = append(changed, u)
 		default:
 			p.mu.Lock()
-			if it := f.items[u]; it != nil && it.seq > int64(st.modSeq) {
+			if it := f.items[u]; it != nil && it.seq > int64(st.ModSeq) {
 				changed = append(changed, u)
 			}
 			p.mu.Unlock()
@@ -972,16 +972,16 @@ func (c *easConn) Sync(name string, st syncState) (*delta, error) {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	d := &delta{reset: reset, present: map[imap.UID]bool{}, validity: f.validity, next: f.next, modSeq: uint64(p.modseq),
-		folderFlags: easFlagsAll, permanentFlags: append(slices.Clone(easFlagsAll), imap.FlagWildcard),
-		fullFlags: reset || st.refetchFlags}
+	d := &Delta{Reset: reset, Present: map[imap.UID]bool{}, Validity: f.validity, Next: f.next, ModSeq: uint64(p.modseq),
+		FolderFlags: easFlagsAll, PermanentFlags: append(slices.Clone(easFlagsAll), imap.FlagWildcard),
+		FullFlags: reset || st.RefetchFlags}
 	for _, u := range all {
-		d.present[u] = true
+		d.Present[u] = true
 	}
 	for _, u := range fresh {
 		it := f.items[u]
 		if it == nil || it.header == nil {
-			delete(d.present, u) // gone meanwhile
+			delete(d.Present, u) // gone meanwhile
 			continue
 		}
 		date := it.date
@@ -990,11 +990,11 @@ func (c *easConn) Sync(name string, st syncState) (*delta, error) {
 				date, _ = m.Header.Date()
 			}
 		}
-		d.fresh = append(d.fresh, freshMessage{uid: u, flags: slices.Clone(it.flags), date: date, size: it.size, header: it.header})
+		d.Fresh = append(d.Fresh, FreshMessage{UID: u, Flags: slices.Clone(it.flags), Date: date, Size: it.size, Header: it.header})
 	}
 	for _, u := range changed {
 		if it := f.items[u]; it != nil {
-			d.flags = append(d.flags, flagUpdate{u, slices.Clone(it.flags)})
+			d.Flags = append(d.Flags, FlagUpdate{u, slices.Clone(it.flags)})
 		}
 	}
 	return d, nil
@@ -1015,12 +1015,12 @@ func (p *easProvider) sids(f *efolder, uids []imap.UID) map[imap.UID]string {
 
 // FetchSections: ActiveSync has no byte ranges of a MIME message.
 func (c *easConn) FetchSections(string, []imap.UID, []Section, func(imap.UID, int, []byte)) error {
-	return errNoPieces
+	return ErrNoPieces
 }
 
 // Search: ActiveSync's Search could, but the proxy reads the messages.
 func (c *easConn) Search(string, *imap.SearchCriteria) ([]imap.UID, error) {
-	return nil, errNoSearch
+	return nil, ErrNoSearch
 }
 
 func (c *easConn) FetchFull(name string, uids []imap.UID, each func(uid imap.UID, raw []byte)) error {
@@ -1366,7 +1366,7 @@ type easWatch struct {
 	heartbeat  int // the server's limit, 0 if it gave none
 }
 
-func (p *easProvider) Watch(func()) (watchConn, error) {
+func (p *easProvider) Watch(func()) (WatchConn, error) {
 	ctx, cancel := p.ctx()
 	defer cancel()
 	if _, err := p.session(ctx); err != nil {
@@ -1389,7 +1389,7 @@ func (w *easWatch) Notifies() bool {
 
 // Wait sends a Ping for every mail folder the model synced, which
 // returns when one of them changes, or after d.
-func (w *easWatch) Wait(ctx context.Context, d time.Duration, changed, wake <-chan struct{}) (wakeup, error) {
+func (w *easWatch) Wait(ctx context.Context, d time.Duration, changed, wake <-chan struct{}) (Wakeup, error) {
 	p := w.p
 	p.mu.Lock()
 	var ids []string
@@ -1420,7 +1420,7 @@ func (w *easWatch) Wait(ctx context.Context, d time.Duration, changed, wake <-ch
 	go func() {
 		select {
 		case <-changed:
-			stopped <- errCredentialsChanged
+			stopped <- ErrCredentialsChanged
 			cancel()
 		case <-wake:
 			stopped <- nil
@@ -1428,12 +1428,12 @@ func (w *easWatch) Wait(ctx context.Context, d time.Duration, changed, wake <-ch
 		case <-pctx.Done():
 		}
 	}()
-	result := func(n wakeup, err error) (wakeup, error) {
+	result := func(n Wakeup, err error) (Wakeup, error) {
 		cancel()
 		select {
 		case e := <-stopped:
 			if e != nil {
-				return wakeup{}, e
+				return Wakeup{}, e
 			}
 		default:
 		}
@@ -1447,7 +1447,7 @@ func (w *easWatch) Wait(ctx context.Context, d time.Duration, changed, wake <-ch
 		case <-pctx.Done():
 		case <-t.C:
 		}
-		return result(wakeup{list: list}, ctx.Err())
+		return result(Wakeup{List: list}, ctx.Err())
 	}
 	hb := min(max(int(d/time.Second), easMinHeartbeat), easMaxHeartbeat)
 	if w.heartbeat > 0 {
@@ -1464,20 +1464,20 @@ func (w *easWatch) Wait(ctx context.Context, d time.Duration, changed, wake <-ch
 	n, err := p.do(rctx, "Ping", wbxml.El("Ping:Ping", wbxml.Tx("Ping:HeartbeatInterval", strconv.Itoa(hb)),
 		wbxml.El("Ping:Folders", folders...)))
 	if pctx.Err() != nil && ctx.Err() == nil {
-		return result(wakeup{}, nil) // ended for the engine
+		return result(Wakeup{}, nil) // ended for the engine
 	}
 	if err != nil {
-		return result(wakeup{}, err)
+		return result(Wakeup{}, err)
 	}
 	if n == nil {
-		return result(wakeup{}, nil)
+		return result(Wakeup{}, nil)
 	}
 	switch n.Value("Status") {
 	case "1": // the heartbeat passed
 		p.mu.Lock()
 		p.pinged = true
 		p.mu.Unlock()
-		return result(wakeup{}, nil)
+		return result(Wakeup{}, nil)
 	case "2":
 		p.mu.Lock()
 		p.pinged = true
@@ -1488,19 +1488,19 @@ func (w *easWatch) Wait(ctx context.Context, d time.Duration, changed, wake <-ch
 			}
 		}
 		p.mu.Unlock()
-		return result(wakeup{names: names}, nil)
+		return result(Wakeup{Names: names}, nil)
 	case "5":
 		w.heartbeat = atoiOr0(n.Value("HeartbeatInterval"))
-		return result(wakeup{}, nil)
+		return result(Wakeup{}, nil)
 	case "6":
 		w.maxFolders = atoiOr0(n.Value("MaxFolders"))
-		return result(wakeup{}, nil)
+		return result(Wakeup{}, nil)
 	case "7":
-		return result(wakeup{list: true}, nil)
+		return result(Wakeup{List: true}, nil)
 	case "3", "4":
-		return result(wakeup{all: true}, nil)
+		return result(Wakeup{All: true}, nil)
 	default:
-		return result(wakeup{}, &eas.StatusError{Cmd: "Ping", Status: atoiOr0(n.Value("Status"))})
+		return result(Wakeup{}, &eas.StatusError{Cmd: "Ping", Status: atoiOr0(n.Value("Status"))})
 	}
 }
 

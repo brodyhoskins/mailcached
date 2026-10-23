@@ -146,7 +146,7 @@ func (a *Account) backfill(ctx context.Context) error {
 	}
 	skipped := map[string]bool{} // folders the provider refused
 	headers, err := a.backfillPass(ctx, log, "lists", lists, skipped, func(msgs []*Message) (int, error) {
-		got, err := a.fetchHeaders(msgs, bulk)
+		got, err := a.fetchHeaders(msgs, PriorityBulk)
 		return len(got), err
 	})
 	if err != nil {

@@ -110,7 +110,8 @@ func TestRejects(t *testing.T) {
 		{base + "accounts: [{imap: {upstream: \"x:993\"}}]\n", "match must be"},
 		{base + "accounts: [{match: \"x.example\", imap: {upstream: \"x:993\"}}]\n", "match must be"},
 		{base + "accounts: [{match: \"*@x.example\", imap: {upstream: \"x:993\"}}]\n", "match must be"},
-		{base + "accounts: [{match: \"@x.example\"}]\n", "none of imap.upstream, smtp.upstream, jmap.upstream and activesync.upstream"},
+		{base + "accounts: [{match: \"@x.example\"}]\n", "none of imap.upstream, smtp.upstream, jmap.upstream, activesync.upstream and provider"},
+		{base + "accounts: [{match: \"@x.example\", provider: snapmailbox, imap: {upstream: \"x:993\"}}]\n", "has provider and imap"},
 		{base + "accounts: [{match: \"@x.example\", jmap: {upstream: \"jmap.x.example\"}}]\n", "must be an https:// URL"},
 		{base + "accounts: [{match: \"@x.example\", jmap: {upstream: \"http://x.example/jmap\"}}]\n", "http sends passwords"},
 		{base + "accounts: [{match: \"@x.example\", jmap: {upstream: \"https://x.example/jmap\", auth: token}}]\n", "auth must be basic or bearer"},
@@ -185,6 +186,20 @@ func TestActiveSyncAccount(t *testing.T) {
 	}
 	if c.AutodetectActiveSync != "fallback" {
 		t.Fatalf("autodetect_activesync %q", c.AutodetectActiveSync)
+	}
+}
+
+func TestProviderAccount(t *testing.T) {
+	c, err := load(t, "imap: {listen: \":993\"}\ntls: {cert_file: /c, key_file: /k}\n"+
+		"accounts: [{match: \"@x.example\", provider: snapmailbox}]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u, match, ok := c.Route("provider", "a@x.example"); !ok || match != "@x.example" || u.Upstream != "snapmailbox" {
+		t.Fatalf("%+v %q %v", u, match, ok)
+	}
+	if _, _, ok := c.Route("imap", "a@x.example"); ok {
+		t.Fatal("imap route for a provider account")
 	}
 }
 

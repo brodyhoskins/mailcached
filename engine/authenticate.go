@@ -543,7 +543,7 @@ func (a *Account) seedLearning() {
 		}
 	}
 	for box, at := range a.locate(missing) {
-		c, err := a.conn(bulk, box)
+		c, err := a.conn(PriorityBulk, box)
 		if err != nil {
 			break
 		}
@@ -618,7 +618,7 @@ func (a *Account) rescueMove(hdr []byte, from, key string) bool {
 
 // movingBack returns the headers to rescueMove after a client moves or
 // copies uids out of Junk or Trash into a checked folder; nil otherwise.
-func (a *Account) movingBack(c conn, box, dest string, uids []imap.UID) (map[imap.UID]*HeaderEntry, error) {
+func (a *Account) movingBack(c Conn, box, dest string, uids []imap.UID) (map[imap.UID]*HeaderEntry, error) {
 	a.mu.Lock()
 	back := box != "" && a.authChecks(dest) &&
 		(box == a.roleFolder(imap.MailboxAttrJunk) || box == a.roleFolder(imap.MailboxAttrTrash))
@@ -888,7 +888,7 @@ func (a *Account) discardIn(how moveAway, box, dest, trash string, msgs []*Messa
 		return
 	}
 	uids := slices.Sorted(maps.Keys(byUID))
-	c, err := a.conn(interactive, box)
+	c, err := a.conn(PriorityInteractive, box)
 	if err != nil {
 		if !errors.Is(err, ErrNoCredentials) {
 			a.b.Log.Warn("could not move away messages", "user", a.login, "mailbox", box, "action", how.act, "err", err)
@@ -993,7 +993,7 @@ func (a *Account) discardIn(how moveAway, box, dest, trash string, msgs []*Messa
 }
 
 // stayed returns the uids not in moved that box still has.
-func stayed(c conn, box string, uids []imap.UID, moved map[imap.UID]imap.UID) (map[imap.UID]bool, error) {
+func stayed(c Conn, box string, uids []imap.UID, moved map[imap.UID]imap.UID) (map[imap.UID]bool, error) {
 	var unsure []imap.UID
 	for _, uid := range uids {
 		if _, ok := moved[uid]; !ok {
@@ -1017,13 +1017,13 @@ func stayed(c conn, box string, uids []imap.UID, moved map[imap.UID]imap.UID) (m
 }
 
 // cheapHeaders reports whether FetchHeaders skips bodies.
-func cheapHeaders(c conn) bool {
+func cheapHeaders(c Conn) bool {
 	x, ok := c.(interface{ cheapHeaders() bool })
 	return ok && x.cheapHeaders()
 }
 
 // exactExpunge reports whether Expunge is limited to the given UIDs.
-func exactExpunge(c conn) bool {
+func exactExpunge(c Conn) bool {
 	x, ok := c.(interface{ exactExpunge() bool })
 	return !ok || x.exactExpunge()
 }
@@ -1054,11 +1054,11 @@ func (a *Account) releaseDeferred() {
 	}
 	l.mu.Unlock()
 	for folder, origins := range byFolder {
-		c, err := a.conn(bulk, folder)
+		c, err := a.conn(PriorityBulk, folder)
 		if err != nil {
 			return
 		}
-		d, err := c.Sync(folder, syncState{known: func(imap.UID) bool { return false }})
+		d, err := c.Sync(folder, SyncState{Known: func(imap.UID) bool { return false }})
 		if err != nil {
 			c.Release(err)
 			a.b.Log.Warn("could not read mail to release", "user", a.login, "mailbox", folder, "err", err)
@@ -1066,9 +1066,9 @@ func (a *Account) releaseDeferred() {
 		}
 		// Full headers are needed for copyOf.
 		var whole []imap.UID
-		for _, f := range d.fresh {
-			if id := identity(f.header); id == "" || ids[id] {
-				whole = append(whole, f.uid)
+		for _, f := range d.Fresh {
+			if id := identity(f.Header); id == "" || ids[id] {
+				whole = append(whole, f.UID)
 			}
 		}
 		headers := map[imap.UID][]byte{}
@@ -1135,7 +1135,7 @@ func (a *Account) releaseDeferred() {
 // whether to continue.
 func (a *Account) releaseTo(folder, origin string, uids []imap.UID, idOf map[imap.UID]string) bool {
 	defer a.lockFolders(folder, origin)()
-	c, err := a.conn(bulk, folder)
+	c, err := a.conn(PriorityBulk, folder)
 	if err != nil {
 		return false
 	}

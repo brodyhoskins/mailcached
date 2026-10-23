@@ -7,27 +7,29 @@ import (
 	"github.com/emersion/go-imap/v2"
 )
 
-// A provider is how an account's engine reaches the mail provider: IMAP
-// (imapprov.go) or JMAP. The engine names messages the way it stores
-// them: a folder, and the provider's UID there. A provider without UIDs
-// gives its messages UIDs of its own.
+// A Provider is how an account's engine reaches the mail provider: IMAP,
+// JMAP, ActiveSync, or one that Engine.NewProvider makes. The engine names
+// messages by folder and the provider's UID there. A provider without UIDs
+// gives its messages UIDs of its own: ascending as messages arrive, never
+// reused in a folder, and the same after a restart. If it cannot keep
+// them, it changes the folder's Validity.
 //
 // A refusal (the provider says no: a folder that is gone, a quota) comes
 // back as an *imap.Error, whatever the protocol. The queue undoes a
 // refused change, and the backfill skips a folder that refuses. Any other
 // error means the provider could not be reached, and the work is tried
 // again later.
-type provider interface {
+type Provider interface {
 	// Login checks password with the provider. A rejection wraps
-	// errLoginRejected.
+	// ErrLoginRejected.
 	Login(password string) error
 	// Conn returns a connection for one request. Call its Release. hint
 	// names the folder the request is about, "" for none: a connection
 	// that has it open already is preferred.
-	Conn(p priority, hint string) (conn, error)
+	Conn(p Priority, hint string) (Conn, error)
 	// Watch opens the engine's own connection, which also waits for
 	// changes. notify is called when the provider reports one.
-	Watch(notify func()) (watchConn, error)
+	Watch(notify func()) (WatchConn, error)
 	// Close closes the idle connections.
 	Close()
 	// Capacity returns the requests the provider takes at once now, 0 for
@@ -36,22 +38,22 @@ type provider interface {
 	Capacity() int
 }
 
-// conn is a connection to the provider. The folder names are the
+// Conn is a connection to the provider. The folder names are the
 // provider's.
-type conn interface {
+type Conn interface {
 	// List reads the folder list.
-	List() ([]folderInfo, error)
+	List() ([]FolderInfo, error)
 	// Sync says what changed in a folder since the state st describes.
-	Sync(name string, st syncState) (*delta, error)
+	Sync(name string, st SyncState) (*Delta, error)
 	// FetchFull downloads whole messages and calls each with every one.
 	// A message the provider no longer has is left out.
 	FetchFull(name string, uids []imap.UID, each func(uid imap.UID, raw []byte)) error
 	// FetchSections downloads sections of messages (piece.go) and calls
 	// each with every one: the message, the section's index in secs, and
-	// its bytes. errNoPieces means the provider cannot.
+	// its bytes. ErrNoPieces means the provider cannot.
 	FetchSections(name string, uids []imap.UID, secs []Section, each func(uid imap.UID, i int, data []byte)) error
 	// Search returns the UIDs in a folder of the messages that match c
-	// at the provider. errNoSearch means the provider cannot.
+	// at the provider. ErrNoSearch means the provider cannot.
 	Search(name string, c *imap.SearchCriteria) ([]imap.UID, error)
 	// FetchHeaders returns the header entries of messages, without their
 	// bodies.
@@ -76,13 +78,13 @@ type conn interface {
 	Release(err error)
 }
 
-// watchConn is the engine's own connection.
-type watchConn interface {
-	conn
+// WatchConn is the engine's own connection.
+type WatchConn interface {
+	Conn
 	// Wait returns when the provider may have changed, or after d, with
-	// what to sync. changed ends it with errCredentialsChanged, and wake
+	// what to sync. changed ends it with ErrCredentialsChanged, and wake
 	// (the provider's notify) ends it early.
-	Wait(ctx context.Context, d time.Duration, changed, wake <-chan struct{}) (wakeup, error)
+	Wait(ctx context.Context, d time.Duration, changed, wake <-chan struct{}) (Wakeup, error)
 	// Notifies reports whether the provider reports every change, in
 	// every folder, so the folders need not all be checked often.
 	Notifies() bool
@@ -91,80 +93,81 @@ type watchConn interface {
 	Describe() []any
 }
 
-// wakeup is what to sync after a Wait.
-type wakeup struct {
-	names []string // folders, by the provider's names
-	all   bool     // every folder
-	list  bool     // the folder list
+// Wakeup is what to sync after a Wait.
+type Wakeup struct {
+	Names []string // folders, by the provider's names
+	All   bool     // every folder
+	List  bool     // the folder list
 }
 
-// folderInfo is one folder of the provider's list.
-type folderInfo struct {
-	name       string
-	delim      rune
-	attrs      []imap.MailboxAttr // without \Subscribed
-	subscribed bool
-	selectable bool
+// FolderInfo is one folder of the provider's list.
+type FolderInfo struct {
+	Name       string
+	Delim      rune
+	Attrs      []imap.MailboxAttr // without \Subscribed
+	Subscribed bool
+	Selectable bool
 }
 
-// syncState is what the proxy knows of a folder at the provider, for
-// conn.Sync.
-type syncState struct {
-	validity uint32
-	next     imap.UID
-	modSeq   uint64
-	// count is how many messages the proxy knows the provider has there.
-	count int
-	// synced is false before the first sync. stale is set when the proxy
-	// may show a message the provider has nowhere; force skips the check
+// SyncState is what the proxy knows of a folder at the provider, for
+// Conn.Sync.
+type SyncState struct {
+	Validity uint32
+	Next     imap.UID
+	ModSeq   uint64
+	// Count is how many messages the proxy knows the provider has there.
+	Count int
+	// Synced is false before the first sync. Stale is set when the proxy
+	// may show a message the provider has nowhere; Force skips the check
 	// that nothing changed.
-	synced, stale, force bool
-	// refetchFlags asks for every flag; flagsFull is when they were last
+	Synced, Stale, Force bool
+	// RefetchFlags asks for every flag; FlagsFull is when they were last
 	// all compared.
-	refetchFlags bool
-	flagsFull    time.Time
-	// known reports whether the proxy knows the message with the
+	RefetchFlags bool
+	FlagsFull    time.Time
+	// Known reports whether the proxy knows the message with the
 	// provider's UID u. It takes the account lock.
-	known func(u imap.UID) bool
+	Known func(u imap.UID) bool
 }
 
-// delta is what changed in a folder at the provider.
-type delta struct {
-	// unchanged says nothing changed; the other fields are empty.
-	unchanged bool
-	// reset says the provider renumbered the folder: every message the
-	// proxy knows there is gone, and fresh lists them all again.
-	reset bool
-	// present, if not nil, is every UID the provider has in the folder.
-	present map[imap.UID]bool
-	// gone lists UIDs the provider no longer has.
-	gone []imap.UID
-	// flags are changed flags of known messages.
-	flags []flagUpdate
-	// fresh are messages the proxy may not know, in any order.
-	fresh []freshMessage
+// Delta is what changed in a folder at the provider.
+type Delta struct {
+	// Unchanged says nothing changed; the other fields are empty.
+	Unchanged bool
+	// Reset says the provider renumbered the folder: every message the
+	// proxy knows there is gone, and Fresh lists them all again.
+	Reset bool
+	// Present, if not nil, is every UID the provider has in the folder.
+	Present map[imap.UID]bool
+	// Gone lists UIDs the provider no longer has.
+	Gone []imap.UID
+	// Flags are changed flags of known messages.
+	Flags []FlagUpdate
+	// Fresh are messages the proxy may not know, in any order.
+	Fresh []FreshMessage
 	// The folder's state after the delta.
-	validity uint32
-	next     imap.UID
-	modSeq   uint64
-	// folderFlags and permanentFlags are the flags the folder supports.
-	folderFlags, permanentFlags []imap.Flag
-	// fullFlags says every flag was compared.
-	fullFlags bool
+	Validity uint32
+	Next     imap.UID
+	ModSeq   uint64
+	// FolderFlags and PermanentFlags are the flags the folder supports.
+	FolderFlags, PermanentFlags []imap.Flag
+	// FullFlags says every flag was compared.
+	FullFlags bool
 }
 
-type flagUpdate struct {
-	uid   imap.UID
-	flags []imap.Flag
+// FlagUpdate is the flags a known message has now.
+type FlagUpdate struct {
+	UID   imap.UID
+	Flags []imap.Flag
 }
 
-// freshMessage is a message as the sync first sees it.
-type freshMessage struct {
-	uid   imap.UID
-	flags []imap.Flag
-	date  time.Time
-	size  int64
-	// header holds the syncSection fields: Message-ID and those the
-	// Transform needs.
-	header []byte
+// FreshMessage is a message as the sync first sees it.
+type FreshMessage struct {
+	UID   imap.UID
+	Flags []imap.Flag
+	Date  time.Time
+	Size  int64
+	// Header is the message's header, or at least the fields NewProvider
+	// was given (Message-ID and those the Transform needs).
+	Header []byte
 }

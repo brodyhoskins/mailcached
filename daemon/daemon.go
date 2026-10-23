@@ -58,6 +58,10 @@ type Hooks struct {
 	Filter    smtpproxy.Filter // SMTP: before submission to the provider
 	// Authorize, if set, runs after each login (engine.Engine.Authorize).
 	Authorize func(a *engine.Account) error
+	// NewProvider makes the provider for an account whose config names
+	// one (provider: in an account), and may claim other logins too
+	// (engine.Engine.NewProvider).
+	NewProvider func(login string, u engine.Upstream, fields []string, password func() string) (engine.Provider, bool)
 	// Started, if not nil, is called once with the engine, after it is
 	// made and before the listeners serve: for a program that calls
 	// Engine.Recheck when what its Transform needs changes.
@@ -117,6 +121,14 @@ func Main(p Program, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
+	if hooks.NewProvider == nil {
+		for _, a := range bc.Accounts {
+			if a.Provider != "" {
+				log.Error("configuration error", "err", fmt.Errorf("config: %s names provider %q, which %s does not have", a.Match, a.Provider, name))
+				return 1
+			}
+		}
+	}
 
 	var reloader *certs.Reloader
 	if bc.TLS.CertFile != "" {
@@ -170,14 +182,18 @@ func Main(p Program, args []string, stdout, stderr io.Writer) int {
 		return f.Upstream, f.Upstream.Upstream != ""
 	}
 
-	// mailRoute returns where a login's mail comes from: "jmap",
-	// "activesync" or "imap", and the server. An account's own entry
+	// mailRoute returns where a login's mail comes from: "provider",
+	// "jmap", "activesync" or "imap", and the server (the provider's name
+	// for "provider"). An account's own entry
 	// says it. For other logins, autodetect_jmap and autodetect_activesync
 	// pick among the servers found: a JMAP server they prefer, then an
 	// ActiveSync server they prefer, then IMAP, then JMAP, then
 	// ActiveSync.
 	mailRoute := func(login string) (string, config.Upstream, bool) {
 		if _, match, _ := bc.Route("imap", login); match != "" {
+			if u, _, ok := bc.Route("provider", login); ok {
+				return "provider", u, true
+			}
 			if u, _, ok := bc.Route("jmap", login); ok {
 				return "jmap", u, true
 			}
@@ -294,6 +310,8 @@ func Main(p Program, args []string, stdout, stderr io.Writer) int {
 		Route: func(login string) (engine.Upstream, bool) {
 			kind, u, ok := mailRoute(login)
 			switch kind {
+			case "provider":
+				return engine.Upstream{Provider: u.Upstream, Timeout: bc.IMAP.Timeout}, ok
 			case "jmap":
 				return engine.Upstream{URL: u.Upstream, Bearer: u.Auth == "bearer", Sources: source(u), MaxConns: maxConns(u), Timeout: bc.IMAP.Timeout}, ok
 			case "activesync":
@@ -304,6 +322,7 @@ func Main(p Program, args []string, stdout, stderr io.Writer) int {
 		Authentication: authMode(bc.Authentication),
 		Timeout:        bc.IMAP.Timeout,
 		Transform:      hooks.Transform,
+		NewProvider:    hooks.NewProvider,
 		Authorize:      hooks.Authorize,
 		Cache:          cache,
 		Backfill:       *bc.Backfill,
@@ -344,7 +363,7 @@ func Main(p Program, args []string, stdout, stderr io.Writer) int {
 			if !ok {
 				// A JMAP or ActiveSync provider without a submission
 				// server sends through the provider.
-				if kind, _, ok := mailRoute(login); ok && kind != "imap" {
+				if kind, _, ok := mailRoute(login); ok && kind != "imap" && kind != "provider" {
 					return smtpproxy.Upstream{Provider: providerSender{eng}, Timeout: bc.SMTP.Timeout}, true
 				}
 			}

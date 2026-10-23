@@ -185,11 +185,11 @@ var folderFlush = 30 * time.Second
 // folderOp makes a folder change at the provider, after the queued changes
 // to messages, which name folders as they were, and reads the folder list
 // again.
-func (a *Account) folderOp(do func(c conn) error) error {
+func (a *Account) folderOp(do func(c Conn) error) error {
 	if err := a.flushQueue(folderFlush); err != nil {
 		return err
 	}
-	c, err := a.conn(interactive, "")
+	c, err := a.conn(PriorityInteractive, "")
 	if err != nil {
 		return err
 	}
@@ -205,17 +205,17 @@ func (a *Account) folderOp(do func(c conn) error) error {
 }
 
 func (a *Account) CreateFolder(name string, opts *imap.CreateOptions) error {
-	return a.folderOp(func(c conn) error { return c.Create(name, opts) })
+	return a.folderOp(func(c Conn) error { return c.Create(name, opts) })
 }
 
 func (a *Account) DeleteFolder(name string) error {
-	return a.folderOp(func(c conn) error { return c.Delete(name) })
+	return a.folderOp(func(c Conn) error { return c.Delete(name) })
 }
 
 // RenameFolder renames a folder and the folders under it. Their messages
 // keep their UIDs.
 func (a *Account) RenameFolder(name, newName string, opts *imap.RenameOptions) error {
-	return a.folderOp(func(c conn) error {
+	return a.folderOp(func(c Conn) error {
 		if err := c.Rename(name, newName, opts); err != nil {
 			return err
 		}
@@ -225,7 +225,7 @@ func (a *Account) RenameFolder(name, newName string, opts *imap.RenameOptions) e
 }
 
 func (a *Account) Subscribe(name string, on bool) error {
-	return a.folderOp(func(c conn) error { return c.Subscribe(name, on) })
+	return a.folderOp(func(c Conn) error { return c.Subscribe(name, on) })
 }
 
 // renameLocal renames a folder and the folders under it in the proxy's
@@ -283,7 +283,7 @@ func (a *Account) Append(name string, data []byte, opts *imap.AppendOptions) (*M
 		}
 		data = out
 	}
-	c, err := a.conn(interactive, "")
+	c, err := a.conn(PriorityInteractive, "")
 	if err != nil {
 		return nil, err
 	}
@@ -589,7 +589,7 @@ func (a *Account) HeaderEntries(msgs []*Message, st *FetchStats) (out map[*Messa
 	}
 	st.Provider += len(missing)
 	// Small, quick, and what the client shows first: interactive.
-	fetched, err := a.fetchHeaders(missing, interactive)
+	fetched, err := a.fetchHeaders(missing, PriorityInteractive)
 	if err != nil {
 		return nil, nil, err
 	}
