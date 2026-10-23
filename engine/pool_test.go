@@ -50,26 +50,26 @@ func newTestEngine(t *testing.T) (*Engine, *Account) {
 func TestInteractiveBeatsBulk(t *testing.T) {
 	_, a := newTestEngine(t)
 
-	var held []conn
+	var held []Conn
 	for range bulkSlots(a) {
-		pc, err := a.conn(bulk, "INBOX")
+		pc, err := a.conn(PriorityBulk, "INBOX")
 		if err != nil {
 			t.Fatal(err)
 		}
 		held = append(held, pc)
 	}
 
-	got := make(chan conn, 1)
+	got := make(chan Conn, 1)
 	go func() {
-		pc, err := a.conn(bulk, "INBOX")
+		pc, err := a.conn(PriorityBulk, "INBOX")
 		if err == nil {
 			got <- pc
 		}
 	}()
 
-	done := make(chan conn, 1)
+	done := make(chan Conn, 1)
 	go func() {
-		pc, err := a.conn(interactive, "INBOX")
+		pc, err := a.conn(PriorityInteractive, "INBOX")
 		if err != nil {
 			t.Error(err)
 		}
@@ -168,9 +168,9 @@ func newTestProvider(t *testing.T, wrap func(net.Listener) net.Listener) *imapPr
 // goes away later.
 func TestPoolLowersAtProviderLimit(t *testing.T) {
 	p := newTestProvider(t, func(l net.Listener) net.Listener { return &capListener{Listener: l, max: 2} })
-	var held []conn
+	var held []Conn
 	for range 2 {
-		pc, err := p.Conn(interactive, "")
+		pc, err := p.Conn(PriorityInteractive, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -180,7 +180,7 @@ func TestPoolLowersAtProviderLimit(t *testing.T) {
 	// the two.
 	got := make(chan error, 1)
 	go func() {
-		pc, err := p.Conn(interactive, "")
+		pc, err := p.Conn(PriorityInteractive, "")
 		if err == nil {
 			pc.Release(nil)
 		}
@@ -224,9 +224,9 @@ func TestPoolClosesIdle(t *testing.T) {
 	connIdleClose = 50 * time.Millisecond
 	t.Cleanup(func() { connIdleClose = old })
 	p := newTestProvider(t, nil)
-	var held []conn
+	var held []Conn
 	for range 3 {
-		pc, err := p.Conn(interactive, "")
+		pc, err := p.Conn(PriorityInteractive, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -265,9 +265,9 @@ func TestPoolGivesToSmallerPool(t *testing.T) {
 		return p
 	}
 	big, small := newPool(), newPool()
-	var held []conn
+	var held []Conn
 	for range 3 {
-		pc, err := big.Conn(interactive, "")
+		pc, err := big.Conn(PriorityInteractive, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -276,12 +276,12 @@ func TestPoolGivesToSmallerPool(t *testing.T) {
 	for _, pc := range held {
 		pc.Release(nil)
 	}
-	first, err := small.Conn(interactive, "")
+	first, err := small.Conn(PriorityInteractive, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer first.Release(nil)
-	second, err := small.Conn(interactive, "")
+	second, err := small.Conn(PriorityInteractive, "")
 	if err != nil {
 		t.Fatalf("the small pool got no second connection: %v", err)
 	}
@@ -313,9 +313,9 @@ func TestPoolSpreadsOverSources(t *testing.T) {
 	u := Upstream{Addr: addr, TLS: config.TLSNone, Timeout: 5 * time.Second, Sources: []string{"127.0.0.1", "127.0.0.2"}}
 	p := newIMAPProvider(enginetest.User, u, &imap.IDData{}, nil, func() string { return enginetest.Password }, testLog)
 	t.Cleanup(p.Close)
-	var held []conn
+	var held []Conn
 	for range 2 {
-		pc, err := p.Conn(interactive, "")
+		pc, err := p.Conn(PriorityInteractive, "")
 		if err != nil {
 			t.Fatal(err)
 		}

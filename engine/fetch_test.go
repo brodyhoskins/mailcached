@@ -190,9 +190,9 @@ func TestClientTakesOver(t *testing.T) {
 // few messages while bulk downloads hold their connections.
 func TestClientBatchInteractive(t *testing.T) {
 	a, msgs, _ := fetchEnv(t, 6, nil)
-	var held []conn
+	var held []Conn
 	for range bulkSlots(a) {
-		pc, err := a.conn(bulk, "INBOX")
+		pc, err := a.conn(PriorityBulk, "INBOX")
 		if err != nil {
 			t.Fatal(err)
 		}

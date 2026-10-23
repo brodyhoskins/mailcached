@@ -208,6 +208,11 @@ type Account struct {
 	// from ActiveSync and imap is not used. Without smtp, mail clients
 	// send through ActiveSync too, and the provider keeps the Sent copy.
 	ActiveSync Upstream `yaml:"activesync"`
+	// Provider names a provider that the program adds (daemon
+	// Hooks.NewProvider), such as snapmailbox. With it, the account's mail
+	// comes from that provider, and imap, jmap and activesync are not
+	// used.
+	Provider string `yaml:"provider"`
 }
 
 // Upstream is a provider server.
@@ -255,7 +260,8 @@ func (a *Addrs) UnmarshalYAML(n *yaml.Node) error {
 }
 
 // Route returns the provider server for a login on service ("imap",
-// "smtp", "jmap" or "activesync"). ok is false when no account matches or the matching account
+// "smtp", "jmap" or "activesync"). For "provider", u.Upstream is the
+// account's Provider name. ok is false when no account matches or the matching account
 // has no server for the service. match is "" when no account matches.
 func (c *Config) Route(service, login string) (u Upstream, match string, ok bool) {
 	acct := c.account(login)
@@ -269,6 +275,8 @@ func (c *Config) Route(service, login string) (u Upstream, match string, ok bool
 		u = acct.JMAP
 	case "activesync":
 		u = acct.ActiveSync
+	case "provider":
+		u = Upstream{Upstream: acct.Provider}
 	default:
 		u = acct.IMAP
 	}
@@ -538,8 +546,11 @@ func (c *Config) validate() error {
 			return fmt.Errorf("config: %s.match %q is listed twice", name, a.Match)
 		}
 		seen[a.Match] = true
-		if a.IMAP.Upstream == "" && a.SMTP.Upstream == "" && a.JMAP.Upstream == "" && a.ActiveSync.Upstream == "" {
-			return fmt.Errorf("config: %s (%s) has none of imap.upstream, smtp.upstream, jmap.upstream and activesync.upstream", name, a.Match)
+		if a.IMAP.Upstream == "" && a.SMTP.Upstream == "" && a.JMAP.Upstream == "" && a.ActiveSync.Upstream == "" && a.Provider == "" {
+			return fmt.Errorf("config: %s (%s) has none of imap.upstream, smtp.upstream, jmap.upstream, activesync.upstream and provider", name, a.Match)
+		}
+		if a.Provider != "" && (a.IMAP.Upstream != "" || a.JMAP.Upstream != "" || a.ActiveSync.Upstream != "") {
+			return fmt.Errorf("config: %s (%s) has provider and imap, jmap or activesync: the mail comes from one provider", name, a.Match)
 		}
 		for _, u := range []struct {
 			svc string

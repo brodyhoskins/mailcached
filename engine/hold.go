@@ -263,7 +263,7 @@ func (a *Account) checkHeld(msgs []*Message) {
 	}
 	for box, at := range a.locate(fetchHeaders) {
 		for chunk := range slices.Chunk(at.uids(), FetchBatch) {
-			c, err := a.conn(interactive, box)
+			c, err := a.conn(PriorityInteractive, box)
 			if err != nil {
 				if !errors.Is(err, ErrNoCredentials) {
 					a.b.Log.Warn("could not read held messages", "user", a.login, "err", err)
@@ -301,7 +301,7 @@ func (a *Account) checkHeld(msgs []*Message) {
 	}
 	for box, at := range a.locate(fetch) {
 		for chunk := range slices.Chunk(at.uids(), FetchBatch) {
-			c, err := a.conn(interactive, box)
+			c, err := a.conn(PriorityInteractive, box)
 			if err != nil {
 				if !errors.Is(err, ErrNoCredentials) {
 					a.b.Log.Warn("could not read held messages", "user", a.login, "err", err)

@@ -48,6 +48,8 @@ type Upstream struct {
 	// no cap but the provider's, which an IMAP provider shows by refusing
 	// a connection and a JMAP one gives in its session.
 	MaxConns int
+	// Provider names a provider that Engine.NewProvider makes.
+	Provider string
 }
 
 // same reports whether u and v are the same provider, reached the same
@@ -55,11 +57,14 @@ type Upstream struct {
 func (u Upstream) same(v Upstream) bool {
 	return u.Addr == v.Addr && u.TLS == v.TLS && u.TLSConfig == v.TLSConfig && u.Timeout == v.Timeout &&
 		slices.Equal(u.Sources, v.Sources) && u.URL == v.URL && u.Bearer == v.Bearer &&
-		u.ActiveSync == v.ActiveSync && u.MaxConns == v.MaxConns
+		u.ActiveSync == v.ActiveSync && u.MaxConns == v.MaxConns && u.Provider == v.Provider
 }
 
 // String names the provider, for logs and for the state saved for it.
 func (u Upstream) String() string {
+	if u.Provider != "" {
+		return u.Provider
+	}
 	if u.URL != "" {
 		return u.URL
 	}
@@ -78,6 +83,12 @@ type Engine struct {
 	// Transform changes messages between the provider and clients; nil
 	// serves them unchanged.
 	Transform Transform
+	// NewProvider, if set, makes the provider for an account before the
+	// built-in ones are tried; ok false leaves it to them. fields are the
+	// header fields FreshMessage.Header must hold. password returns the
+	// password the client gave, "" before a login or after the upstream
+	// changed.
+	NewProvider func(login string, u Upstream, fields []string, password func() string) (p Provider, ok bool)
 	// Authentication is the sender authentication mode; "" is off.
 	Authentication AuthMode
 	// LookupTXT overrides DNS for DMARC lookups in tests.

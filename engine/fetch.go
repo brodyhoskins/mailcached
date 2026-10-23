@@ -19,7 +19,7 @@ const interactiveFetch = 3
 
 // fetchHeaders asks the provider for the header entries of msgs, and
 // saves them. A message the provider no longer has is missing.
-func (a *Account) fetchHeaders(msgs []*Message, p priority) (map[*Message]*HeaderEntry, error) {
+func (a *Account) fetchHeaders(msgs []*Message, p Priority) (map[*Message]*HeaderEntry, error) {
 	out := map[*Message]*HeaderEntry{}
 	for box, at := range a.locate(msgs) {
 		for chunk := range slices.Chunk(at.uids(), FetchBatch) {
@@ -286,9 +286,9 @@ func (a *Account) fetchFrom(msgs []*Message, out map[*Message][]byte, cl *claime
 		for _, box := range boxesInOrder(where, msgs) {
 			at := where[box]
 			for chunk := range slices.Chunk(at.inOrder(msgs), FetchBatch) {
-				p := bulk
+				p := PriorityBulk
 				if first {
-					p, first = interactive, false
+					p, first = PriorityInteractive, false
 				}
 				c, err := a.conn(p, box)
 				if err != nil {
@@ -420,7 +420,7 @@ func (a *Account) prefetch(msgs []*Message) {
 // is cached exactly as the provider has it, so the cache and the provider
 // agree on every byte. Results also go to out, if not nil. It returns the
 // messages it got. withAuth, if set, adds the verdict to Read's context.
-func (b *Engine) fetchFull(c conn, box, account string, uids []imap.UID, at located, out map[*Message][]byte,
+func (b *Engine) fetchFull(c Conn, box, account string, uids []imap.UID, at located, out map[*Message][]byte,
 	withAuth func(context.Context, []byte) context.Context) ([]*Message, error) {
 	var got []*Message
 	// The header entries of transformed messages, so client lists need not

@@ -23,7 +23,7 @@ var NewMailWait = 8 * time.Second
 // awaitNewMail downloads the new messages among fresh, in folder name,
 // and returns when they are cached or NewMailWait passes. It runs before
 // the resync applies fresh, without a.mu.
-func (a *Account) awaitNewMail(name string, fresh []freshMessage, reset bool) {
+func (a *Account) awaitNewMail(name string, fresh []FreshMessage, reset bool) {
 	if NewMailWait <= 0 || len(fresh) == 0 || a.b.Cache == nil {
 		return
 	}
@@ -36,7 +36,7 @@ func (a *Account) awaitNewMail(name string, fresh []freshMessage, reset bool) {
 		return
 	}
 	for _, f := range fresh {
-		if m.atP[f.uid] != nil {
+		if m.atP[f.UID] != nil {
 			continue
 		}
 		key := a.keyFor(f)
@@ -44,8 +44,8 @@ func (a *Account) awaitNewMail(name string, fresh []freshMessage, reset bool) {
 			continue
 		}
 		// Not bound or shown: only download reads it.
-		msg := &Message{date: f.date, key: key, direct: a.b.direct(f.header), pBox: name, pUID: f.uid}
-		if a.mustCheck(msg) || msg.direct && f.size > PieceWhole {
+		msg := &Message{date: f.Date, key: key, direct: a.b.direct(f.Header), pBox: name, pUID: f.UID}
+		if a.mustCheck(msg) || msg.direct && f.Size > PieceWhole {
 			continue
 		}
 		msgs = append(msgs, msg)

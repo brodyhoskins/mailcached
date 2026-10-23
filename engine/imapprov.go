@@ -490,17 +490,20 @@ var ignoreUnilateral = &imapclient.UnilateralDataHandler{
 // interactive ones when the pool has two or more, and an interactive request that waits is served before
 // any waiting bulk request. New mail therefore opens at once even during a
 // large download.
-type priority bool
+//
+// Priority is a request's kind: PriorityInteractive when a client waits on
+// it, PriorityBulk for a large download.
+type Priority bool
 
 const (
-	bulk        priority = false
-	interactive priority = true
+	PriorityBulk        Priority = false
+	PriorityInteractive Priority = true
 )
 
 // Conn returns a pooled connection. After a dial that failed for want of
 // room on the provider, or of an answer, it tries again, as Login does:
 // from another source, or on a connection that is open already.
-func (p *imapProvider) Conn(prio priority, hint string) (conn, error) {
+func (p *imapProvider) Conn(prio Priority, hint string) (Conn, error) {
 	var err error
 	for range len(p.srcs) + 1 {
 		var pc *imapConn
@@ -532,15 +535,15 @@ func (p *imapProvider) healthy() bool {
 
 // conn1 tries for a connection once. On failure, gave reports whether
 // another account gave one up for the next try.
-func (p *imapProvider) conn1(prio priority, hint string) (pc *imapConn, gave bool, err error) {
+func (p *imapProvider) conn1(prio Priority, hint string) (pc *imapConn, gave bool, err error) {
 	p.poolMu.Lock()
-	if prio == interactive {
+	if prio == PriorityInteractive {
 		p.prioWaiting++
 	}
 	for pc == nil {
 		// Bulk waits while interactive requests wait, and never takes the
 		// connection reserved for them.
-		if prio == bulk && (p.prioWaiting > 0 || p.bulkBusy >= p.bulkLimit()) {
+		if prio == PriorityBulk && (p.prioWaiting > 0 || p.bulkBusy >= p.bulkLimit()) {
 			p.poolCond.Wait()
 			continue
 		}
@@ -581,7 +584,7 @@ func (p *imapProvider) conn1(prio priority, hint string) (pc *imapConn, gave boo
 				p.open--
 				src.open--
 				gave := src.crowdedBy(err)
-				if prio == interactive {
+				if prio == PriorityInteractive {
 					p.prioWaiting--
 				}
 				p.poolCond.Broadcast()
@@ -606,12 +609,12 @@ func (p *imapProvider) conn1(prio priority, hint string) (pc *imapConn, gave boo
 		}
 		p.poolCond.Wait()
 	}
-	if prio == interactive {
+	if prio == PriorityInteractive {
 		p.prioWaiting--
 	} else {
 		p.bulkBusy++
 	}
-	pc.bulk = prio == bulk
+	pc.bulk = prio == PriorityBulk
 	p.poolMu.Unlock()
 	return pc, false, nil
 }
@@ -760,7 +763,7 @@ func (pc *imapConn) unselect(mailbox string) error {
 
 // --- Folders --------------------------------------------------------------
 
-func (pc *imapConn) List() ([]folderInfo, error) {
+func (pc *imapConn) List() ([]FolderInfo, error) {
 	c := pc.c
 	opts := &imap.ListOptions{}
 	if c.Caps().Has(imap.CapSpecialUse) || c.Caps().Has(imap.CapIMAP4rev2) {
@@ -785,20 +788,20 @@ func (pc *imapConn) List() ([]folderInfo, error) {
 			subscribed[CanonicalName(s.Mailbox)] = true
 		}
 	}
-	out := make([]folderInfo, 0, len(list))
+	out := make([]FolderInfo, 0, len(list))
 	for _, d := range list {
-		f := folderInfo{
-			name:  CanonicalName(d.Mailbox),
-			delim: d.Delim,
-			attrs: slices.DeleteFunc(slices.Clone(d.Attrs), func(x imap.MailboxAttr) bool {
+		f := FolderInfo{
+			Name:  CanonicalName(d.Mailbox),
+			Delim: d.Delim,
+			Attrs: slices.DeleteFunc(slices.Clone(d.Attrs), func(x imap.MailboxAttr) bool {
 				return strings.EqualFold(string(x), string(imap.MailboxAttrSubscribed))
 			}),
-			selectable: !HasAttr(d.Attrs, imap.MailboxAttrNoSelect) && !HasAttr(d.Attrs, imap.MailboxAttrNonExistent),
+			Selectable: !HasAttr(d.Attrs, imap.MailboxAttrNoSelect) && !HasAttr(d.Attrs, imap.MailboxAttrNonExistent),
 		}
 		if extended {
-			f.subscribed = HasAttr(d.Attrs, imap.MailboxAttrSubscribed)
+			f.Subscribed = HasAttr(d.Attrs, imap.MailboxAttrSubscribed)
 		} else {
-			f.subscribed = subscribed[f.name]
+			f.Subscribed = subscribed[f.Name]
 		}
 		out = append(out, f)
 	}
@@ -837,7 +840,7 @@ func (pc *imapConn) Subscribe(name string, on bool) error {
 // (their fingerprint fields, never the body), the changed flags of the
 // others (with CONDSTORE, or all of them every fullFlagInterval), and,
 // when the counts disagree, every UID.
-func (pc *imapConn) Sync(name string, st syncState) (*delta, error) {
+func (pc *imapConn) Sync(name string, st SyncState) (*Delta, error) {
 	c := pc.c
 	condstore := c.Caps().Has(imap.CapCondStore)
 	s, err := c.Status(name, &imap.StatusOptions{
@@ -846,14 +849,14 @@ func (pc *imapConn) Sync(name string, st syncState) (*delta, error) {
 	if err != nil {
 		return nil, err
 	}
-	fullFlags := st.refetchFlags || (!condstore && time.Since(st.flagsFull) > fullFlagInterval)
-	if !st.force && !st.stale && st.synced && s.UIDValidity == st.validity && s.UIDNext == st.next &&
-		s.NumMessages != nil && int(*s.NumMessages) == st.count &&
-		(!condstore || s.HighestModSeq == st.modSeq) && !fullFlags {
-		return &delta{unchanged: true}, nil
+	fullFlags := st.RefetchFlags || (!condstore && time.Since(st.FlagsFull) > fullFlagInterval)
+	if !st.Force && !st.Stale && st.Synced && s.UIDValidity == st.Validity && s.UIDNext == st.Next &&
+		s.NumMessages != nil && int(*s.NumMessages) == st.Count &&
+		(!condstore || s.HighestModSeq == st.ModSeq) && !fullFlags {
+		return &Delta{Unchanged: true}, nil
 	}
-	reset := st.validity != 0 && s.UIDValidity != st.validity
-	start := st.next
+	reset := st.Validity != 0 && s.UIDValidity != st.Validity
+	start := st.Next
 	if reset || start == 0 {
 		start = 1
 	}
@@ -884,10 +887,10 @@ func (pc *imapConn) Sync(name string, st syncState) (*delta, error) {
 
 	// Changed flags on the messages from before start.
 	var changed []*imapclient.FetchMessageBuffer
-	if !reset && start > 1 && (condstore && st.modSeq > 0 || fullFlags) {
+	if !reset && start > 1 && (condstore && st.ModSeq > 0 || fullFlags) {
 		opts := &imap.FetchOptions{UID: true, Flags: true}
-		if condstore && st.modSeq > 0 && !fullFlags {
-			opts.ChangedSince = st.modSeq
+		if condstore && st.ModSeq > 0 && !fullFlags {
+			opts.ChangedSince = st.ModSeq
 		}
 		if changed, err = c.Fetch(imap.UIDSet{{Start: 1, Stop: start - 1}}, opts).Collect(); err != nil {
 			return nil, err
@@ -896,27 +899,27 @@ func (pc *imapConn) Sync(name string, st syncState) (*delta, error) {
 
 	// Deleted messages, or ones the proxy never saw: the counts will
 	// disagree.
-	have, fresh := st.count, 0
+	have, fresh := st.Count, 0
 	if reset {
 		have = 0
 	}
 	for _, f := range got {
-		if reset || !st.known(f.UID) {
+		if reset || !st.Known(f.UID) {
 			fresh++
 		}
 	}
-	d := &delta{reset: reset, validity: sel.UIDValidity, modSeq: sel.HighestModSeq, fullFlags: fullFlags,
-		folderFlags: sel.Flags, permanentFlags: sel.PermanentFlags}
+	d := &Delta{Reset: reset, Validity: sel.UIDValidity, ModSeq: sel.HighestModSeq, FullFlags: fullFlags,
+		FolderFlags: sel.Flags, PermanentFlags: sel.PermanentFlags}
 	if uint32(have+fresh) != sel.NumMessages {
 		res, err := c.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
 		if err != nil {
 			return nil, err
 		}
-		d.present = map[imap.UID]bool{}
+		d.Present = map[imap.UID]bool{}
 		var unseen []imap.UID
 		for _, u := range res.AllUIDs() {
-			d.present[u] = true
-			if u < start && !st.known(u) {
+			d.Present[u] = true
+			if u < start && !st.Known(u) {
 				unseen = append(unseen, u)
 			}
 		}
@@ -929,15 +932,15 @@ func (pc *imapConn) Sync(name string, st syncState) (*delta, error) {
 		}
 	}
 
-	d.next = sel.UIDNext
+	d.Next = sel.UIDNext
 	for _, f := range got {
-		d.next = max(d.next, f.UID+1)
-		d.fresh = append(d.fresh, freshMessage{uid: f.UID, flags: NonNil(f.Flags), date: f.InternalDate,
-			size: f.RFC822Size, header: f.FindBodySection(pc.p.section())})
+		d.Next = max(d.Next, f.UID+1)
+		d.Fresh = append(d.Fresh, FreshMessage{UID: f.UID, Flags: NonNil(f.Flags), Date: f.InternalDate,
+			Size: f.RFC822Size, Header: f.FindBodySection(pc.p.section())})
 	}
 	for _, f := range changed {
 		// Asked for FLAGS: an empty list decodes as nil.
-		d.flags = append(d.flags, flagUpdate{f.UID, NonNil(f.Flags)})
+		d.Flags = append(d.Flags, FlagUpdate{f.UID, NonNil(f.Flags)})
 	}
 	return d, nil
 }
@@ -1269,7 +1272,7 @@ type imapWatch struct {
 	tap        *notifyTap
 }
 
-func (p *imapProvider) Watch(notify func()) (watchConn, error) {
+func (p *imapProvider) Watch(notify func()) (WatchConn, error) {
 	tap := newNotifyTap(notify)
 	// The engine's connection goes first: it takes a source with room if
 	// one has, else the least used.
@@ -1322,27 +1325,27 @@ func (w *imapWatch) Notifies() bool { return w.notify == notifyFlags }
 
 // Wait idles on INBOX, or sleeps on a provider without IDLE. Either way
 // INBOX is synced next, with the folders NOTIFY reported.
-func (w *imapWatch) Wait(ctx context.Context, d time.Duration, changed, wake <-chan struct{}) (wakeup, error) {
+func (w *imapWatch) Wait(ctx context.Context, d time.Duration, changed, wake <-chan struct{}) (Wakeup, error) {
 	up, err := w.wait(ctx, d, changed, wake)
 	if err != nil {
 		return up, err
 	}
 	names, all, list := w.tap.take()
-	up.all, up.list = all, list
+	up.All, up.List = all, list
 	for _, n := range names {
 		if n != "INBOX" {
-			up.names = append(up.names, n)
+			up.Names = append(up.Names, n)
 		}
 	}
 	return up, nil
 }
 
-func (w *imapWatch) wait(ctx context.Context, d time.Duration, changed, wake <-chan struct{}) (wakeup, error) {
-	inbox := wakeup{names: []string{"INBOX"}}
+func (w *imapWatch) wait(ctx context.Context, d time.Duration, changed, wake <-chan struct{}) (Wakeup, error) {
+	inbox := Wakeup{Names: []string{"INBOX"}}
 	// The sync selects only when something changed; IDLE needs INBOX.
 	if w.selected != "INBOX" {
 		if err := w.sel("INBOX", true); err != nil {
-			return wakeup{}, err
+			return Wakeup{}, err
 		}
 	}
 	timer := time.NewTimer(max(d, 0))
@@ -1350,9 +1353,9 @@ func (w *imapWatch) wait(ctx context.Context, d time.Duration, changed, wake <-c
 	if !hasIdle(w.c) {
 		select {
 		case <-ctx.Done():
-			return wakeup{}, ctx.Err()
+			return Wakeup{}, ctx.Err()
 		case <-changed:
-			return wakeup{}, errCredentialsChanged
+			return Wakeup{}, ErrCredentialsChanged
 		case <-wake:
 			return inbox, nil
 		case <-timer.C:
@@ -1361,14 +1364,14 @@ func (w *imapWatch) wait(ctx context.Context, d time.Duration, changed, wake <-c
 	}
 	idle, err := w.c.Idle()
 	if err != nil {
-		return wakeup{}, err
+		return Wakeup{}, err
 	}
 	var werr error
 	select {
 	case <-ctx.Done():
 		werr = ctx.Err()
 	case <-changed:
-		werr = errCredentialsChanged
+		werr = ErrCredentialsChanged
 	case <-wake:
 	case <-timer.C:
 	case <-w.c.Closed():
@@ -1378,7 +1381,7 @@ func (w *imapWatch) wait(ctx context.Context, d time.Duration, changed, wake <-c
 		werr = err
 	}
 	if werr != nil {
-		return wakeup{}, werr
+		return Wakeup{}, werr
 	}
 	return inbox, nil
 }

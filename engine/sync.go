@@ -38,8 +38,11 @@ var (
 )
 
 var (
-	ErrLoginRejected      = errors.New("login rejected")
-	errCredentialsChanged = errors.New("credentials changed")
+	// ErrLoginRejected is the provider's rejection of a login.
+	ErrLoginRejected = errors.New("login rejected")
+	// ErrCredentialsChanged ends a WatchConn.Wait when the password
+	// changes.
+	ErrCredentialsChanged = errors.New("credentials changed")
 )
 
 func (a *Account) run(ctx context.Context) {
@@ -61,7 +64,7 @@ func (a *Account) run(ctx context.Context) {
 			log.Warn("sync: the provider rejected the password; stopped until a client logs in", "err", err)
 			a.forgetCredentials()
 			return
-		case errors.Is(err, errCredentialsChanged):
+		case errors.Is(err, ErrCredentialsChanged):
 			retry = time.Second
 			continue
 		}
@@ -152,16 +155,16 @@ func (a *Account) session(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if w.list {
+		if w.List {
 			if err := a.refreshList(up); err != nil {
 				return err
 			}
 		}
-		if w.all {
+		if w.All {
 			nextSweep = time.Now()
 			continue
 		}
-		for _, name := range w.names {
+		for _, name := range w.Names {
 			if err := a.resync(up, name); err != nil {
 				var ie *imap.Error
 				if errors.As(err, &ie) {
@@ -171,14 +174,14 @@ func (a *Account) session(ctx context.Context) error {
 				return err
 			}
 		}
-		if len(w.names) > 0 {
+		if len(w.Names) > 0 {
 			a.startBackfill(ctx)
 		}
 	}
 }
 
 // sweep resyncs every selectable folder.
-func (a *Account) sweep(up conn) error {
+func (a *Account) sweep(up Conn) error {
 	a.mu.Lock()
 	var names []string
 	for name, m := range a.boxes {

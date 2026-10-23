@@ -93,11 +93,9 @@ func (s Section) whole() Section {
 // pieceKey is where the cache keeps a piece of the message with key.
 func pieceKey(key string, s Section) string { return hashKey("piece", key, s.String()) }
 
-// errNoPieces means the provider cannot give pieces: read the message
+// ErrNoPieces means the provider cannot give pieces: read the message
 // whole.
-var errNoPieces = errors.New("the provider gives whole messages only")
-
-var errNoSearch = errors.New("the provider does not search")
+var ErrNoPieces = errors.New("the provider gives whole messages only")
 
 // Pieces gets sections of direct messages: from the cache, or from the
 // provider, which is asked for just them, and they are cached. A message
@@ -131,9 +129,9 @@ func (a *Account) Pieces(msgs []*Message, secs []Section, encodings func(*Messag
 	if len(missing) == 0 {
 		return out, nil
 	}
-	p := bulk
+	p := PriorityBulk
 	if len(missing) <= interactiveFetch {
-		p = interactive
+		p = PriorityInteractive
 	}
 	st.Provider += len(missing)
 	for box, at := range a.locate(missing) {
@@ -177,7 +175,7 @@ func (a *Account) Pieces(msgs []*Message, secs []Section, encodings func(*Messag
 				}
 			}
 			c.Release(err)
-			if errors.Is(err, errNoPieces) {
+			if errors.Is(err, ErrNoPieces) {
 				for _, u := range chunk {
 					for _, msg := range at[u] {
 						delete(out, msg)
@@ -288,7 +286,7 @@ func PartEncoding(bs imap.BodyStructure, part []int) (string, bool) {
 }
 
 // ErrNoSearch means the provider cannot search: read the messages.
-var ErrNoSearch = errNoSearch
+var ErrNoSearch = errors.New("the provider does not search")
 
 // SearchAtProvider asks the provider which of msgs match c, for messages
 // the proxy does not change: the provider has the same text. It returns
@@ -297,7 +295,7 @@ var ErrNoSearch = errNoSearch
 func (a *Account) SearchAtProvider(msgs []*Message, c *imap.SearchCriteria) (map[*Message]bool, error) {
 	out := map[*Message]bool{}
 	for box, at := range a.locate(msgs) {
-		cn, err := a.conn(interactive, box)
+		cn, err := a.conn(PriorityInteractive, box)
 		if err != nil {
 			return nil, err
 		}

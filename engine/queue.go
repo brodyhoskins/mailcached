@@ -382,7 +382,7 @@ func (a *Account) runFlags(o *op, group []*op) error {
 	}
 	var results []result
 	for box, msgs := range byBox {
-		c, err := a.conn(interactive, box)
+		c, err := a.conn(PriorityInteractive, box)
 		if err != nil {
 			return err
 		}
@@ -451,7 +451,7 @@ func uidList(set imap.UIDSet) []imap.UID {
 // settleFolder resyncs dest with its lock held, which binds what the
 // provider made without saying where, and removes what it did not make.
 func (a *Account) settleFolder(dest string) {
-	c, err := a.conn(interactive, "")
+	c, err := a.conn(PriorityInteractive, "")
 	if err != nil {
 		return
 	}
@@ -482,7 +482,7 @@ func (a *Account) runMove(o *op, group []*op) error {
 		if !slices.Contains(names, box) {
 			continue // the next run takes it
 		}
-		c, err := a.conn(interactive, box)
+		c, err := a.conn(PriorityInteractive, box)
 		if err != nil {
 			return err
 		}
@@ -555,7 +555,7 @@ func (a *Account) runCopy(o *op, group []*op) error {
 	if o.started && !move {
 		// Interrupted: the copies the provider made already are found by
 		// their keys first, so they are not made twice.
-		c, err := a.conn(interactive, "")
+		c, err := a.conn(PriorityInteractive, "")
 		if err != nil {
 			return err
 		}
@@ -586,7 +586,7 @@ func (a *Account) runCopy(o *op, group []*op) error {
 		for i, p := range pairs {
 			srcs[i] = p[1]
 		}
-		c, err := a.conn(interactive, box)
+		c, err := a.conn(PriorityInteractive, box)
 		if err != nil {
 			return err
 		}
@@ -656,7 +656,7 @@ func (a *Account) runExpunge(o *op, group []*op) error {
 		if !slices.Contains(names, box) {
 			continue // the next run takes it
 		}
-		c, err := a.conn(interactive, box)
+		c, err := a.conn(PriorityInteractive, box)
 		if err != nil {
 			return err
 		}
