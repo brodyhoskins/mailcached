@@ -5,13 +5,15 @@ archives:
       - README.md
     formats: [tar.gz, tar.zst]
     name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}"
+    zstd:
+      level: best
 
 before:
   hooks:
     - go mod verify
     - rm -rf build
     - mkdir build
-    - sh -c "git archive --prefix={{ .ProjectName }}-{{ .Version }}/ {{ .FullCommit }} | zstd -19 -q -o build/{{ .ProjectName }}-{{ .Version }}.tar.zst"
+    - sh -c "git archive --prefix={{ .ProjectName }}-{{ .Version }}/ {{ .FullCommit }} | zstd --ultra -22 -q -o build/{{ .ProjectName }}-{{ .Version }}.tar.zst"
 
 builds:
   - &build
@@ -77,11 +79,15 @@ nfpms:
     description: Local IMAP and SMTP server that caches mail from any provider, so mail clients get answers at once.
     file_name_template: "{{ .ConventionalFileName }}"
     formats: [apk, rpm]
+    deb:
+      compression: xz
     homepage: https://github.com/brodyhoskins/mailcached
     id: apk-rpm
     license: MIT
     maintainer: Brody Hoskins
     package_name: mailcached
+    rpm:
+      compression: xz
     scripts:
       postinstall: packaging/postinstall.sh
       preinstall: packaging/preinstall.sh
