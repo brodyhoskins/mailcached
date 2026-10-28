@@ -361,9 +361,9 @@ func Main(p Program, args []string, stdout, stderr io.Writer) int {
 		Route: func(login string) (smtpproxy.Upstream, bool) {
 			u, ok := route("smtp", login)
 			if !ok {
-				// A JMAP or ActiveSync provider without a submission
-				// server sends through the provider.
-				if kind, _, ok := mailRoute(login); ok && kind != "imap" && kind != "provider" {
+				// A JMAP, ActiveSync or hook provider without a
+				// submission server sends through the provider.
+				if kind, _, ok := mailRoute(login); ok && kind != "imap" {
 					return smtpproxy.Upstream{Provider: providerSender{eng}, Timeout: bc.SMTP.Timeout}, true
 				}
 			}
@@ -562,8 +562,8 @@ func servePprof(envName, addr string, log *slog.Logger) {
 	}()
 }
 
-// providerSender sends SMTP clients' mail through a JMAP or ActiveSync
-// provider.
+// providerSender sends SMTP clients' mail through a JMAP, ActiveSync or
+// hook provider. A provider that cannot send refuses the mail.
 type providerSender struct{ eng *engine.Engine }
 
 func (j providerSender) Verify(login, password string) error {
@@ -576,7 +576,7 @@ func (j providerSender) Verify(login, password string) error {
 
 func (j providerSender) Send(ctx context.Context, login, _ string, env *smtpproxy.Envelope) error {
 	err := j.eng.Account(login).Send(ctx, env.From, env.To, env.Data)
-	if errors.Is(err, engine.ErrSendRefused) {
+	if errors.Is(err, engine.ErrSendRefused) || errors.Is(err, engine.ErrNoSending) {
 		return &smtp.SMTPError{Code: 554, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: err.Error()}
 	}
 	return err
