@@ -109,6 +109,10 @@ CREATE TABLE IF NOT EXISTS reads (
 	key      TEXT PRIMARY KEY,
 	read_at  INTEGER NOT NULL  -- unix seconds
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS retries (
+	key  TEXT PRIMARY KEY,
+	at   INTEGER NOT NULL  -- unix seconds
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS jmap_boxes (
 	id         TEXT PRIMARY KEY,
 	validity   INTEGER NOT NULL,
@@ -507,8 +511,61 @@ func (s *Store) putHeaders(account string, entries map[string]*HeaderEntry) erro
 			key, h.Header, h.Size, structure, h.Preview, now); err != nil {
 			return errors.Join(err, tx.Rollback())
 		}
+		if _, err := tx.Exec(`DELETE FROM retries WHERE key = ?`, key); err != nil {
+			return errors.Join(err, tx.Rollback())
+		}
 	}
 	return tx.Commit()
+}
+
+// putRetries records that the Transform's Read of the messages of keys was
+// not final, so the backfill does not download them again (retryKeys).
+func (s *Store) putRetries(account string, keys []string) error {
+	if s == nil || len(keys) == 0 {
+		return nil
+	}
+	db, err := s.db(account)
+	if err != nil {
+		return err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	for _, key := range keys {
+		if _, err := tx.Exec(`INSERT INTO retries (key, at) VALUES (?, ?)
+			ON CONFLICT (key) DO UPDATE SET at = excluded.at`, key, now); err != nil {
+			return errors.Join(err, tx.Rollback())
+		}
+	}
+	return tx.Commit()
+}
+
+// retryKeys returns the keys putRetries recorded and no header entry
+// replaced since.
+func (s *Store) retryKeys(account string) (map[string]bool, error) {
+	if s == nil {
+		return nil, nil
+	}
+	db, err := s.reader(account)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT key FROM retries`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		out[key] = true
+	}
+	return out, rows.Err()
 }
 
 // headerKeys returns the keys that have a header entry. Unlike headers, it
@@ -717,15 +774,19 @@ func (s *Store) Prune(maxAge time.Duration) (int, error) {
 	return n, errors.Join(errs...)
 }
 
-// prune deletes from db the header entries and the records of reads older
-// than cutoff (unix seconds), and returns how many header entries.
+// prune deletes from db the header entries, the records of reads and the
+// retries older than cutoff (unix seconds), and returns how many header
+// entries.
 func prune(db *sql.DB, cutoff int64) (int, error) {
 	res, err := db.Exec(`DELETE FROM headers WHERE used < ?`, cutoff)
 	if err != nil {
 		return 0, err
 	}
 	n, _ := res.RowsAffected()
-	_, err = db.Exec(`DELETE FROM reads WHERE read_at < ?`, cutoff)
+	if _, err := db.Exec(`DELETE FROM reads WHERE read_at < ?`, cutoff); err != nil {
+		return int(n), err
+	}
+	_, err = db.Exec(`DELETE FROM retries WHERE at < ?`, cutoff)
 	return int(n), err
 }
 

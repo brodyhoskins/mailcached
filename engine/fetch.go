@@ -426,9 +426,13 @@ func (b *Engine) fetchFull(c Conn, box, account string, uids []imap.UID, at loca
 	// The header entries of transformed messages, so client lists need not
 	// read them whole.
 	entries := map[string]*HeaderEntry{}
+	var retries []string
 	defer func() {
 		if err := b.Store.putHeaders(account, entries); err != nil {
 			b.Log.Warn("imap: could not save header entries", "user", account, "err", err)
+		}
+		if err := b.Store.putRetries(account, retries); err != nil {
+			b.Log.Warn("imap: could not save retries", "user", account, "err", err)
 		}
 	}()
 	err := c.FetchFull(box, uids, func(uid imap.UID, raw []byte) {
@@ -448,6 +452,8 @@ func (b *Engine) fetchFull(c Conn, box, account string, uids []imap.UID, at loca
 			// A message clients see already: ReadHold is ReadRetry.
 			if final = st == ReadFinal; final {
 				entries[msgs[0].key] = EntryOf(data)
+			} else {
+				retries = append(retries, msgs[0].key)
 			}
 		}
 		for _, m := range msgs {
