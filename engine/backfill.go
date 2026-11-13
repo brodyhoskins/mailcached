@@ -25,7 +25,9 @@ import (
 // It runs when the engine connects, and again after a sweep that found
 // new messages. Messages with an entry are skipped, except those a client
 // read lately that the cache lost (refillable): they are downloaded again,
-// so a new or emptied cache gets back what clients read.
+// so a new or emptied cache gets back what clients read. Messages whose
+// Read was not final (Store.retryKeys) are skipped too: they get no entry
+// and no disk copy, so every run would download them again.
 
 // backfillWindow is how many messages, newest first across all folders,
 // the backfill handles at a time.
@@ -90,6 +92,10 @@ func (a *Account) backfill(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	retries, err := a.b.Store.retryKeys(a.login)
+	if err != nil {
+		return err
+	}
 	a.mu.Lock()
 	var todo []backfillItem
 	for name, m := range a.boxes {
@@ -106,7 +112,9 @@ func (a *Account) backfill(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	todo = slices.DeleteFunc(todo, func(it backfillItem) bool { return have[it.msg.key] && !lost[it.msg.key] })
+	todo = slices.DeleteFunc(todo, func(it backfillItem) bool {
+		return have[it.msg.key] && !lost[it.msg.key] || retries[it.msg.key]
+	})
 	if len(todo) == 0 {
 		return nil
 	}

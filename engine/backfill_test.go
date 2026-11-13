@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/textproto"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -161,5 +163,68 @@ func TestStorePrunesReadsOnOpen(t *testing.T) {
 	}
 	if err := r.QueryRow(`SELECT count(*) FROM reads`).Scan(&n); err != nil || n != 1 {
 		t.Errorf("%d reads kept, %v; want 1", n, err)
+	}
+}
+
+// retryTransform changes every message and gives ReadRetry, as a
+// Transform does while the provider's stamp is not known yet.
+type retryTransform struct{ reads atomic.Int32 }
+
+func (*retryTransform) Fields() []string                  { return nil }
+func (*retryTransform) Changes(textproto.MIMEHeader) bool { return true }
+func (t *retryTransform) Read(_ context.Context, raw []byte) ([]byte, ReadStatus) {
+	t.reads.Add(1)
+	return raw, ReadRetry
+}
+func (*retryTransform) Write(_ context.Context, raw []byte) ([]byte, error) { return raw, nil }
+
+// TestBackfillSkipsRetry does not download a ReadRetry message again, also
+// after Recheck, until a header entry replaces the retry.
+func TestBackfillSkipsRetry(t *testing.T) {
+	addr, _ := enginetest.IMAP(t, testLog, nil)
+	dir := t.TempDir()
+	st, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	c := &Cache{Dir: dir, MaxBytes: 1 << 20}
+	t.Cleanup(func() { c.Close() })
+	tr := &retryTransform{}
+	b := &Engine{Store: st, Timeout: 5 * time.Second, Cache: c, Log: testLog, Transform: tr,
+		Route: func(string) (Upstream, bool) {
+			return Upstream{Addr: addr, TLS: config.TLSNone, Timeout: 5 * time.Second}, true
+		}}
+	t.Cleanup(b.Close)
+	a := b.Account(enginetest.User)
+	if err := a.Login(enginetest.Password); err != nil {
+		t.Fatal(err)
+	}
+	body := bytes.Repeat([]byte("Hello.\r\n"), int(PieceWhole)/8)
+	appendTo(t, addr, "INBOX", append([]byte("Message-ID: <retry@test>\r\nSubject: Retry\r\n\r\n"), body...))
+	if err := a.SyncNow("INBOX"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.backfill(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := tr.reads.Load(); n != 1 {
+		t.Fatalf("first backfill: %d reads, want 1", n)
+	}
+	b.Recheck()
+	if err := a.backfill(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := tr.reads.Load(); n != 1 {
+		t.Fatalf("backfill after Recheck: %d reads, want 1", n)
+	}
+	a.mu.Lock()
+	key := a.boxes["INBOX"].msgs[0].key
+	a.mu.Unlock()
+	if err := st.putHeaders(a.login, map[string]*HeaderEntry{key: EntryOf([]byte("Subject: Final\r\n\r\n"))}); err != nil {
+		t.Fatal(err)
+	}
+	if retries, err := st.retryKeys(a.login); err != nil || retries[key] {
+		t.Fatalf("retries = %v, %v after a header entry", retries, err)
 	}
 }
